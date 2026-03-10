@@ -28,6 +28,22 @@ fn make_noise_buffer9(width: usize, height: usize, seed: u64) -> Vec<u16> {
     out
 }
 
+fn digit_from_keycode(keycode: Keycode) -> Option<u16> {
+    match keycode {
+        Keycode::_0 | Keycode::Kp0 => Some(0),
+        Keycode::_1 | Keycode::Kp1 => Some(1),
+        Keycode::_2 | Keycode::Kp2 => Some(2),
+        Keycode::_3 | Keycode::Kp3 => Some(3),
+        Keycode::_4 | Keycode::Kp4 => Some(4),
+        Keycode::_5 | Keycode::Kp5 => Some(5),
+        Keycode::_6 | Keycode::Kp6 => Some(6),
+        Keycode::_7 | Keycode::Kp7 => Some(7),
+        Keycode::_8 | Keycode::Kp8 => Some(8),
+        Keycode::_9 | Keycode::Kp9 => Some(9),
+        _ => None,
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
@@ -55,6 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut noise9 = make_noise_buffer9(width as usize, height as usize, 0x5EED_F00D);
 
     let mut events = sdl.event_pump()?;
+    let mut grain_multiplier: u16 = 1;
+    println!("Grain: {grain_multiplier}x (press number keys 0-9 to change)");
     'running: loop {
         for event in events.poll_iter() {
             match event {
@@ -63,6 +81,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(keycode),
+                    repeat,
+                    ..
+                } => {
+                    if !repeat {
+                        if let Some(d) = digit_from_keycode(keycode) {
+                            grain_multiplier = d;
+                            println!("Key: {:?} -> Grain: {grain_multiplier}x", keycode);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -84,7 +114,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let row = &mut buf[y * pitch..(y + 1) * pitch];
                     for x in 0..width as usize {
                         let idx = y * width as usize + x;
-                        let blended16 = gradient16[idx].saturating_add(noise9[idx]);
+                        let noise_term = noise9[idx].saturating_mul(grain_multiplier);
+                        let blended16 = gradient16[idx].saturating_add(noise_term);
                         let c = (blended16 >> 8) as u8;
                         let off = x * 4;
                         // ARGB8888 little-endian memory order: B, G, R, A.
