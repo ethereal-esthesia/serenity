@@ -104,8 +104,9 @@ impl FastRng {
     /// Returns the next 8-bit value remapped through a Gaussian-like
     /// distribution lookup.
     ///
-    /// The lookup table is an inverse CDF built from Pascal row n=255
-    /// (`C(255, k)` shape, p=0.5). `lut[0]` is pinned to zero.
+    /// The lookup table is an inverse CDF built from a standard Gaussian
+    /// profile (`exp(-0.5 * z^2)`) over the discrete 0..255 domain.
+    /// `lut[0]` is pinned to zero.
     #[inline]
     pub fn next_gaussian8(&mut self) -> u8 {
         let idx = self.next_u8();
@@ -175,25 +176,14 @@ fn gaussian8_lut() -> &'static [u8; 256] {
 }
 
 fn build_gaussian8_lut() -> [u8; 256] {
-    const N: usize = 255;
+    // Use a classic Gaussian PDF over discrete bins. Sigma chosen so the
+    // half-range (127.5) is ~3σ, matching a visually smooth center-heavy falloff.
+    const MU: f64 = 127.5;
+    const SIGMA: f64 = 127.5 / 3.0;
     let mut weights = [0.0f64; 256];
-
-    // Two middle bins for odd N are equal. Anchor them at 1.0 then recurse.
-    weights[127] = 1.0;
-    weights[128] = 1.0;
-
-    // Right side recurrence:
-    // C(N, k+1) = C(N, k) * (N-k)/(k+1)
-    for k in 128..255 {
-        let next = weights[k] * ((N - k) as f64) / ((k + 1) as f64);
-        weights[k + 1] = next;
-    }
-
-    // Left side recurrence:
-    // C(N, k-1) = C(N, k) * k/(N-k+1)
-    for k in (1..=127).rev() {
-        let prev = weights[k] * (k as f64) / ((N - k + 1) as f64);
-        weights[k - 1] = prev;
+    for (k, w) in weights.iter_mut().enumerate() {
+        let z = (k as f64 - MU) / SIGMA;
+        *w = (-0.5 * z * z).exp();
     }
 
     let total: f64 = weights.iter().sum();
