@@ -13,6 +13,8 @@ pub struct FastRng {
     bits_left: u8,
     cache16: u64,
     left16: u8,
+    cache8: u64,
+    left8: u8,
     cache32: u64,
     left32: u8,
     cache_bool: u64,
@@ -32,6 +34,8 @@ impl FastRng {
             bits_left: 0,
             cache16: 0,
             left16: 0,
+            cache8: 0,
+            left8: 0,
             cache32: 0,
             left32: 0,
             cache_bool: 0,
@@ -82,6 +86,18 @@ impl FastRng {
         let shift = (self.left16 - 1) * 16;
         self.left16 -= 1;
         ((self.cache16 >> shift) & 0xFFFF) as u16
+    }
+
+    /// Returns the next 8-bit pseudorandom value.
+    #[inline]
+    pub fn next_u8(&mut self) -> u8 {
+        if self.left8 == 0 {
+            self.cache8 = self.next_word64();
+            self.left8 = 8;
+        }
+        let shift = (self.left8 - 1) * 8;
+        self.left8 -= 1;
+        ((self.cache8 >> shift) & 0xFF) as u8
     }
 
     /// Returns the next 32-bit pseudorandom value.
