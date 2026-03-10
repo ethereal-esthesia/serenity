@@ -36,10 +36,17 @@ Project scaffold is initialized. Engine modules and render loop are in progress.
 
 ```bash
 cd /Users/shane/Project/serenity
-cargo run
+cargo run --release
 ```
 
-Default run is an animated top-down ocean renderer (neon-accent night style) using the project palette and debanding filter pipeline.
+Default run is an animated neon pattern renderer using the project palette and debanding filter pipeline.
+
+For smooth runtime performance, use release mode:
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run --release
+```
 
 Controls:
 - `Esc`: quit
