@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
+    sdl.mouse().show_cursor(false);
 
     let initial_width: u32 = 1024;
     let initial_height: u32 = 768;
@@ -149,5 +150,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    sdl.mouse().show_cursor(true);
     Ok(())
 }
