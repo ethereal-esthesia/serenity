@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fps_frames: u64 = 0;
     let ocean_start = Instant::now();
     let mut window_shown = false;
-    println!("Top-down ocean mode (default, neon accents). Press Esc to quit.");
+    println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
     'running: loop {
         for event in events.poll_iter() {
