@@ -85,22 +85,6 @@ fn make_noise_buffer_for_grain(width: usize, height: usize, seed: u64, grain: u1
     out
 }
 
-fn digit_from_keycode(keycode: Keycode) -> Option<u16> {
-    match keycode {
-        Keycode::_0 | Keycode::Kp0 => Some(0),
-        Keycode::_1 | Keycode::Kp1 => Some(1),
-        Keycode::_2 | Keycode::Kp2 => Some(2),
-        Keycode::_3 | Keycode::Kp3 => Some(3),
-        Keycode::_4 | Keycode::Kp4 => Some(4),
-        Keycode::_5 | Keycode::Kp5 => Some(5),
-        Keycode::_6 | Keycode::Kp6 => Some(6),
-        Keycode::_7 | Keycode::Kp7 => Some(7),
-        Keycode::_8 | Keycode::Kp8 => Some(8),
-        Keycode::_9 | Keycode::Kp9 => Some(9),
-        _ => None,
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let palette256 = make_palette_256();
 
@@ -130,8 +114,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut noise = make_noise_buffer_for_grain(width as usize, height as usize, 0x5EED_F00D, 1);
 
     let mut events = sdl.event_pump()?;
+    const MIN_GRAIN: u16 = 0;
+    const MAX_GRAIN: u16 = 32;
     let mut grain_multiplier: u16 = 1;
-    println!("Indexed mode | Grain: {grain_multiplier}x (press number keys 0-9 to change)");
+    println!("Indexed mode | Grain: {grain_multiplier}x (bits={}, '+'/'-' to change)", grain_multiplier * 8);
     'running: loop {
         for event in events.poll_iter() {
             match event {
@@ -146,8 +132,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..
                 } => {
                     if !repeat {
-                        if let Some(d) = digit_from_keycode(keycode) {
-                            grain_multiplier = d;
+                        let mut changed = false;
+                        match keycode {
+                            Keycode::Plus | Keycode::KpPlus | Keycode::Equals => {
+                                if grain_multiplier < MAX_GRAIN {
+                                    grain_multiplier += 1;
+                                    changed = true;
+                                }
+                            }
+                            Keycode::Minus | Keycode::KpMinus => {
+                                if grain_multiplier > MIN_GRAIN {
+                                    grain_multiplier -= 1;
+                                    changed = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                        if changed {
                             noise = make_noise_buffer_for_grain(
                                 width as usize,
                                 height as usize,
@@ -156,8 +157,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             let range_hi = grain_multiplier.saturating_mul(256).saturating_sub(1);
                             println!(
-                                "Key: {:?} -> Grain: {grain_multiplier}x (adds 0..{})",
-                                keycode, range_hi
+                                "Key: {:?} -> Grain: {grain_multiplier}x (bits={}, adds 0..{})",
+                                keycode, grain_multiplier * 8, range_hi
                             );
                         }
                     }
