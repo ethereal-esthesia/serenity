@@ -67,14 +67,23 @@ fn next_bits_u128(rng: &mut FastRng, bits: u16) -> u128 {
     out
 }
 
-fn make_noise_buffer_for_grain(width: usize, height: usize, seed: u64, grain: u16) -> Vec<u16> {
-    if grain == 0 {
+fn range_hi_for_bits(bits: u16) -> u32 {
+    if bits == 0 {
+        0
+    } else if bits >= 16 {
+        65535
+    } else {
+        (1u32 << bits) - 1
+    }
+}
+
+fn make_noise_buffer_for_bits(width: usize, height: usize, seed: u64, bits: u16) -> Vec<u16> {
+    if bits == 0 {
         return vec![0u16; width * height];
     }
 
-    // 1x=>8 bits, 2x=>16 bits, 3x=>24 bits, ...
-    let bits_per_sample = grain * 8;
-    let range: u128 = (grain as u128) * 256; // 1x=>256, 2x=>512, 3x=>768...
+    let bits_per_sample = bits;
+    let range: u128 = range_hi_for_bits(bits) as u128 + 1;
 
     let mut rng = FastRng::new(seed);
     let mut out = vec![0u16; width * height];
@@ -111,13 +120,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut gradient16 = make_gradient_buffer16(width as usize, height as usize);
-    let mut noise = make_noise_buffer_for_grain(width as usize, height as usize, 0x5EED_F00D, 1);
+    let mut noise_bits: u16 = 8;
+    let mut noise = make_noise_buffer_for_bits(width as usize, height as usize, 0x5EED_F00D, noise_bits);
 
     let mut events = sdl.event_pump()?;
-    const MIN_GRAIN: u16 = 0;
-    const MAX_GRAIN: u16 = 32;
-    let mut grain_multiplier: u16 = 1;
-    println!("Indexed mode | Grain: {grain_multiplier}x (bits={}, '+'/'-' to change)", grain_multiplier * 8);
+    const MIN_BITS: u16 = 0;
+    const MAX_BITS: u16 = 16;
+    println!(
+        "Indexed mode | Noise bits={} (adds 0..{}, '+'/'-' to change by 1)",
+        noise_bits,
+        range_hi_for_bits(noise_bits)
+    );
     'running: loop {
         for event in events.poll_iter() {
             match event {
@@ -135,30 +148,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut changed = false;
                         match keycode {
                             Keycode::Plus | Keycode::KpPlus | Keycode::Equals => {
-                                if grain_multiplier < MAX_GRAIN {
-                                    grain_multiplier += 1;
+                                if noise_bits < MAX_BITS {
+                                    noise_bits += 1;
                                     changed = true;
                                 }
                             }
                             Keycode::Minus | Keycode::KpMinus => {
-                                if grain_multiplier > MIN_GRAIN {
-                                    grain_multiplier -= 1;
+                                if noise_bits > MIN_BITS {
+                                    noise_bits -= 1;
                                     changed = true;
                                 }
                             }
                             _ => {}
                         }
                         if changed {
-                            noise = make_noise_buffer_for_grain(
+                            noise = make_noise_buffer_for_bits(
                                 width as usize,
                                 height as usize,
                                 0x5EED_F00D,
-                                grain_multiplier,
+                                noise_bits,
                             );
-                            let range_hi = grain_multiplier.saturating_mul(256).saturating_sub(1);
                             println!(
-                                "Key: {:?} -> Grain: {grain_multiplier}x (bits={}, adds 0..{})",
-                                keycode, grain_multiplier * 8, range_hi
+                                "Key: {:?} -> Noise bits={} (adds 0..{})",
+                                keycode,
+                                noise_bits,
+                                range_hi_for_bits(noise_bits)
                             );
                         }
                     }
@@ -175,11 +189,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             gradient16 = make_gradient_buffer16(width as usize, height as usize);
-            noise = make_noise_buffer_for_grain(
+            noise = make_noise_buffer_for_bits(
                 width as usize,
                 height as usize,
                 0x5EED_F00D,
-                grain_multiplier,
+                noise_bits,
             );
         }
 
