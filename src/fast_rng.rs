@@ -4,6 +4,7 @@
 /// - Internal state period: `2^64 - 1` (for non-zero seed).
 /// - `next_bits(1..=64)` is user-callable shared-stream access.
 /// - Typed outputs (`next_u16/u32/u64/bool`) use fast cached paths.
+/// - `next_gaussian8()` uses an inverse-CDF lookup derived from Pascal row n=255.
 ///
 /// This is designed for speed and long non-repeat state duration, not security.
 #[derive(Clone, Copy, Debug)]
@@ -100,6 +101,17 @@ impl FastRng {
         ((self.cache8 >> shift) & 0xFF) as u8
     }
 
+    /// Returns the next 8-bit value remapped through a Gaussian-like
+    /// distribution lookup.
+    ///
+    /// The lookup table is an inverse CDF built from Pascal row n=255
+    /// (`C(255, k)` shape, p=0.5). `lut[0]` is pinned to zero.
+    #[inline]
+    pub fn next_gaussian8(&mut self) -> u8 {
+        let idx = self.next_u8();
+        gaussian8_lut()[idx as usize]
+    }
+
     /// Returns the next 32-bit pseudorandom value.
     #[inline]
     pub fn next_u32(&mut self) -> u32 {
@@ -155,6 +167,51 @@ fn mask_low_bits(bits: u8) -> u64 {
     } else {
         (1u64 << bits) - 1
     }
+}
+
+fn gaussian8_lut() -> &'static [u8; 256] {
+    static LUT: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(build_gaussian8_lut)
+}
+
+fn build_gaussian8_lut() -> [u8; 256] {
+    const N: usize = 255;
+    let mut weights = [0.0f64; 256];
+
+    // Two middle bins for odd N are equal. Anchor them at 1.0 then recurse.
+    weights[127] = 1.0;
+    weights[128] = 1.0;
+
+    // Right side recurrence:
+    // C(N, k+1) = C(N, k) * (N-k)/(k+1)
+    for k in 128..255 {
+        let next = weights[k] * ((N - k) as f64) / ((k + 1) as f64);
+        weights[k + 1] = next;
+    }
+
+    // Left side recurrence:
+    // C(N, k-1) = C(N, k) * k/(N-k+1)
+    for k in (1..=127).rev() {
+        let prev = weights[k] * (k as f64) / ((N - k + 1) as f64);
+        weights[k - 1] = prev;
+    }
+
+    let total: f64 = weights.iter().sum();
+    let mut lut = [0u8; 256];
+    lut[0] = 0; // requested behavior
+
+    let mut cdf = 0.0f64;
+    let mut x = 0usize;
+    for (q, slot) in lut.iter_mut().enumerate().skip(1) {
+        let target = (q as f64) * total / 255.0;
+        while x < 255 && cdf < target {
+            cdf += weights[x];
+            x += 1;
+        }
+        *slot = x as u8;
+    }
+
+    lut
 }
 
 #[cfg(test)]
@@ -431,6 +488,24 @@ mod tests {
         assert_eq!(a, 0);
         assert_eq!(b, 0x47E4);
         assert_eq!(c, 0xABCF);
+    }
+
+    #[test]
+    fn gaussian8_reasonable_distribution() {
+        let mut rng = FastRng::new(0x1234_5678_9ABC_DEF0);
+        let n = 200_000usize;
+        let mut sum = 0u64;
+        let mut hist = [0usize; 256];
+        for _ in 0..n {
+            let v = rng.next_gaussian8();
+            sum += v as u64;
+            hist[v as usize] += 1;
+        }
+        let mean = sum as f64 / n as f64;
+        // Centered near middle.
+        assert!(mean > 120.0 && mean < 136.0, "mean out of range: {mean}");
+        // Center should be far denser than edge.
+        assert!(hist[128] > hist[16], "center not denser than edge");
     }
 
     #[test]
