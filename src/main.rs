@@ -2,9 +2,9 @@ use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
 use sdl3::pixels::Color;
 use sdl3::pixels::PixelFormatEnum;
+use serenity::palette::{Palette256, palette_256};
 use serenity::pixel_buffer::{
     DebandingDistribution, DebandingFilter, PixelBuffer, make_gradient_buffer16,
-    make_soft_sky_palette_256,
 };
 use std::f32::consts::TAU;
 use std::time::Instant;
@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[main] debug enabled");
     }
 
-    let palette256 = make_soft_sky_palette_256();
+    let palette256 = palette_256(Palette256::SoftSky);
 
     let sdl = sdl3::init()?;
     let _ = sdl3::hint::set("SDL_RENDER_VSYNC", "1");
@@ -145,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pixels = PixelBuffer::new_with_debug(
                 width as usize,
                 height as usize,
-                make_soft_sky_palette_256(),
+                palette_256(Palette256::SoftSky),
                 debug,
             );
             pixels.set_base(make_gradient_buffer16(width as usize, height as usize));
