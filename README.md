@@ -39,9 +39,31 @@ cd /Users/shane/Project/serenity
 cargo run
 ```
 
+Default run is gradient-only (no runtime mode toggles).
+
 Controls:
 - `Esc`: quit
-- `Space`: toggle noise mode (`Linear` / `Gaussian`)
+
+Optional screenshot output:
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run -- --screenshot /tmp/serenity_main.ppm
+```
+
+Interactive noise test (non-default):
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run --bin noise_texture_test
+```
+
+Optional screenshot output:
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run --bin noise_texture_test -- --screenshot /tmp/serenity_noise.ppm
+```
 
 ## Test
 

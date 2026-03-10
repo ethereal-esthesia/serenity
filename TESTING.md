@@ -59,3 +59,33 @@ Outputs:
 cd /Users/shane/Project/serenity
 cargo run
 ```
+
+This is the default gradient-only renderer.
+
+Optional screenshot:
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run -- --screenshot /tmp/serenity_main.ppm
+```
+
+## 7) Run the non-default interactive noise/panel test
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run --bin noise_texture_test
+```
+
+For performance timing (`draw_ms`/`fps`), use release mode:
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run --release --bin noise_texture_test
+```
+
+Optional screenshot:
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run --bin noise_texture_test -- --screenshot /tmp/serenity_noise.ppm
+```
