@@ -39,9 +39,15 @@ cd /Users/shane/Project/serenity
 cargo run
 ```
 
+Controls:
+- `Esc`: quit
+- `Space`: toggle noise mode (`Linear` / `Gaussian`)
+
 ## Test
 
 ```bash
 cd /Users/shane/Project/serenity
 cargo test
 ```
+
+See [TESTING.md](./TESTING.md) for full test and data-dump examples.

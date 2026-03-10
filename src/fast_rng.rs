@@ -4,7 +4,7 @@
 /// - Internal state period: `2^64 - 1` (for non-zero seed).
 /// - `next_bits(1..=64)` is user-callable shared-stream access.
 /// - Typed outputs (`next_u16/u32/u64/bool`) use fast cached paths.
-/// - `next_gaussian8()` uses an inverse-CDF lookup derived from Pascal row n=255.
+/// - `next_gaussian8()` uses a cache-friendly interpolated inverse-CDF lookup.
 ///
 /// This is designed for speed and long non-repeat state duration, not security.
 #[derive(Clone, Copy, Debug)]
@@ -104,13 +104,36 @@ impl FastRng {
     /// Returns the next 8-bit value remapped through a Gaussian-like
     /// distribution lookup.
     ///
-    /// The lookup table is an inverse CDF built from a standard Gaussian
+    /// The lookup table is a 257-point inverse CDF built from a standard Gaussian
     /// profile (`exp(-0.5 * z^2)`) over the discrete 0..255 domain.
-    /// `lut[0]` is pinned to zero.
+    /// Sampling uses `next_u16()`:
+    /// - upper byte selects adjacent LUT anchors
+    /// - lower byte interpolates when anchors differ by more than 1
     #[inline]
     pub fn next_gaussian8(&mut self) -> u8 {
-        let idx = self.next_u8();
-        gaussian8_lut()[idx as usize]
+        let idx = self.next_u16();
+        let hi = (idx >> 8) as usize;
+        let lo = (idx & 0x00FF) as i32;
+        let lut = gaussian8_lut257_fp();
+        let b1 = lut[hi] as i32;
+        let b2 = lut[hi + 1] as i32;
+        let d = b2 - b1;
+        let y_fp = b1 + ((d * lo + 128) >> 8);
+        let y_u8 = (y_fp + 128) >> 8;
+        y_u8.clamp(0, 255) as u8
+    }
+
+    /// Returns the exact 257-entry lookup table used by `next_gaussian8()`.
+    #[inline]
+    pub fn gaussian8_table() -> &'static [u8; 257] {
+        gaussian8_lut257_u8()
+    }
+
+    /// Returns the exact 8.8 fixed-point 257-entry LUT used internally by
+    /// `next_gaussian8()`. Intended for diagnostics and tooling.
+    #[inline]
+    pub fn gaussian8_table_fp() -> &'static [u16; 257] {
+        gaussian8_lut257_fp()
     }
 
     /// Returns the next 32-bit pseudorandom value.
@@ -170,12 +193,24 @@ fn mask_low_bits(bits: u8) -> u64 {
     }
 }
 
-fn gaussian8_lut() -> &'static [u8; 256] {
-    static LUT: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
-    LUT.get_or_init(build_gaussian8_lut)
+fn gaussian8_lut257_fp() -> &'static [u16; 257] {
+    static LUT: std::sync::OnceLock<[u16; 257]> = std::sync::OnceLock::new();
+    LUT.get_or_init(build_gaussian8_lut257_fp)
 }
 
-fn build_gaussian8_lut() -> [u8; 256] {
+fn gaussian8_lut257_u8() -> &'static [u8; 257] {
+    static LUT8: std::sync::OnceLock<[u8; 257]> = std::sync::OnceLock::new();
+    LUT8.get_or_init(|| {
+        let src = gaussian8_lut257_fp();
+        let mut out = [0u8; 257];
+        for (i, v) in src.iter().enumerate() {
+            out[i] = ((v + 128) >> 8).clamp(0, 255) as u8;
+        }
+        out
+    })
+}
+
+fn build_gaussian8_lut257_fp() -> [u16; 257] {
     // Use a classic Gaussian PDF over discrete bins. Sigma chosen so the
     // half-range (127.5) is ~3σ, matching a visually smooth center-heavy falloff.
     const MU: f64 = 127.5;
@@ -186,19 +221,28 @@ fn build_gaussian8_lut() -> [u8; 256] {
         *w = (-0.5 * z * z).exp();
     }
 
-    let total: f64 = weights.iter().sum();
-    let mut lut = [0u8; 256];
-    lut[0] = 0; // requested behavior
+    let mut cdf = [0.0f64; 257];
+    for i in 0..256 {
+        cdf[i + 1] = cdf[i] + weights[i];
+    }
+    let total = cdf[256];
 
-    let mut cdf = 0.0f64;
-    let mut x = 0usize;
-    for (q, slot) in lut.iter_mut().enumerate().skip(1) {
-        let target = (q as f64) * total / 255.0;
-        while x < 255 && cdf < target {
-            cdf += weights[x];
-            x += 1;
+    let mut lut = [0u16; 257];
+    let mut i = 0usize;
+    for (q, slot) in lut.iter_mut().enumerate() {
+        let target = (q as f64) * total / 256.0;
+        while i < 255 && cdf[i + 1] < target {
+            i += 1;
         }
-        *slot = x as u8;
+        let left = cdf[i];
+        let right = cdf[i + 1];
+        let frac = if right > left {
+            (target - left) / (right - left)
+        } else {
+            0.0
+        };
+        let x = (i as f64 + frac).clamp(0.0, 255.0);
+        *slot = (x * 256.0).round() as u16;
     }
 
     lut

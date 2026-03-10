@@ -55,7 +55,29 @@ fn make_gradient_buffer16(width: usize, height: usize) -> Vec<u16> {
 
 const NOISE_RSHIFT: u8 = 1;
 
-fn make_noise_buffer_0_511(width: usize, height: usize, seed: u64) -> Vec<u16> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoiseMode {
+    Linear,
+    Gaussian,
+}
+
+impl NoiseMode {
+    fn toggled(self) -> Self {
+        match self {
+            Self::Linear => Self::Gaussian,
+            Self::Gaussian => Self::Linear,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::Gaussian => "Gaussian",
+        }
+    }
+}
+
+fn make_noise_buffer_linear_0_511(width: usize, height: usize, seed: u64) -> Vec<u16> {
     let mut rng = FastRng::new(seed);
     let mut out = vec![0u16; width * height];
     for p in &mut out {
@@ -65,6 +87,22 @@ fn make_noise_buffer_0_511(width: usize, height: usize, seed: u64) -> Vec<u16> {
         *p = ((raw16 >> NOISE_RSHIFT) % 511) as u16;
     }
     out
+}
+
+fn make_noise_buffer_gaussian_0_510(width: usize, height: usize, seed: u64) -> Vec<u16> {
+    let mut rng = FastRng::new(seed);
+    let mut out = vec![0u16; width * height];
+    for p in &mut out {
+        *p = (rng.next_gaussian8() as u16) * 2;
+    }
+    out
+}
+
+fn make_noise_buffer(width: usize, height: usize, seed: u64, mode: NoiseMode) -> Vec<u16> {
+    match mode {
+        NoiseMode::Linear => make_noise_buffer_linear_0_511(width, height, seed),
+        NoiseMode::Gaussian => make_noise_buffer_gaussian_0_510(width, height, seed),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -93,10 +131,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut gradient16 = make_gradient_buffer16(width as usize, height as usize);
-    let mut noise = make_noise_buffer_0_511(width as usize, height as usize, 0x5EED_F00D);
+    let mut noise_mode = NoiseMode::Linear;
+    let mut noise = make_noise_buffer(width as usize, height as usize, 0x5EED_F00D, noise_mode);
 
     let mut events = sdl.event_pump()?;
-    println!("Indexed mode | Fixed noise range: 0..510 (u16 from cached u8, >> {NOISE_RSHIFT})");
+    println!(
+        "Indexed mode | Space toggles noise mode | Current: {}",
+        noise_mode.label()
+    );
     'running: loop {
         for event in events.poll_iter() {
             match event {
@@ -105,6 +147,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(Keycode::Space),
+                    repeat: false,
+                    ..
+                } => {
+                    noise_mode = noise_mode.toggled();
+                    noise = make_noise_buffer(width as usize, height as usize, 0x5EED_F00D, noise_mode);
+                    println!("Noise mode: {}", noise_mode.label());
+                }
                 _ => {}
             }
         }
@@ -117,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             gradient16 = make_gradient_buffer16(width as usize, height as usize);
-            noise = make_noise_buffer_0_511(width as usize, height as usize, 0x5EED_F00D);
+            noise = make_noise_buffer(width as usize, height as usize, 0x5EED_F00D, noise_mode);
         }
 
         texture
