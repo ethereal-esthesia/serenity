@@ -5,6 +5,40 @@ use sdl3::pixels::PixelFormatEnum;
 
 use serenity::fast_rng::FastRng;
 
+fn lerp_u8(a: u8, b: u8, num: usize, den: usize) -> u8 {
+    if den == 0 {
+        return a;
+    }
+    let av = a as usize;
+    let bv = b as usize;
+    let v = (av * (den - num) + bv * num) / den;
+    v as u8
+}
+
+fn make_palette_256() -> Vec<[u8; 3]> {
+    // Soft sky palette: deep navy -> blue -> cyan -> white.
+    let points: [(usize, [u8; 3]); 4] = [
+        (0, [4, 10, 28]),
+        (96, [34, 76, 178]),
+        (192, [132, 206, 255]),
+        (255, [245, 252, 255]),
+    ];
+    let mut out = vec![[0u8; 3]; 256];
+    for w in points.windows(2) {
+        let (i0, c0) = (w[0].0, w[0].1);
+        let (i1, c1) = (w[1].0, w[1].1);
+        let den = i1 - i0;
+        for (k, slot) in out.iter_mut().enumerate().take(i1 + 1).skip(i0) {
+            let num = k - i0;
+            let r = lerp_u8(c0[0], c1[0], num, den);
+            let g = lerp_u8(c0[1], c1[1], num, den);
+            let b = lerp_u8(c0[2], c1[2], num, den);
+            *slot = [r, g, b];
+        }
+    }
+    out
+}
+
 fn make_gradient_buffer16(width: usize, height: usize) -> Vec<u16> {
     let mut out = vec![0u16; width * height];
     let max_sum = (width - 1) + (height - 1);
@@ -19,11 +53,34 @@ fn make_gradient_buffer16(width: usize, height: usize) -> Vec<u16> {
     out
 }
 
-fn make_noise_buffer9(width: usize, height: usize, seed: u64) -> Vec<u16> {
+fn next_bits_u128(rng: &mut FastRng, bits: u16) -> u128 {
+    if bits == 0 {
+        return 0;
+    }
+    let mut remaining = bits;
+    let mut out: u128 = 0;
+    while remaining > 0 {
+        let take = remaining.min(64);
+        out = (out << take) | rng.next_bits(take as u8) as u128;
+        remaining -= take;
+    }
+    out
+}
+
+fn make_noise_buffer_for_grain(width: usize, height: usize, seed: u64, grain: u16) -> Vec<u16> {
+    if grain == 0 {
+        return vec![0u16; width * height];
+    }
+
+    // 1x=>8 bits, 2x=>16 bits, 3x=>24 bits, ...
+    let bits_per_sample = grain * 8;
+    let range: u128 = (grain as u128) * 256; // 1x=>256, 2x=>512, 3x=>768...
+
     let mut rng = FastRng::new(seed);
     let mut out = vec![0u16; width * height];
     for p in &mut out {
-        *p = (rng.next_bits(9) & 0x01FF) as u16;
+        let raw = next_bits_u128(&mut rng, bits_per_sample);
+        *p = (raw % range) as u16;
     }
     out
 }
@@ -45,6 +102,8 @@ fn digit_from_keycode(keycode: Keycode) -> Option<u16> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let palette256 = make_palette_256();
+
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
 
@@ -68,11 +127,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut gradient16 = make_gradient_buffer16(width as usize, height as usize);
-    let mut noise9 = make_noise_buffer9(width as usize, height as usize, 0x5EED_F00D);
+    let mut noise = make_noise_buffer_for_grain(width as usize, height as usize, 0x5EED_F00D, 1);
 
     let mut events = sdl.event_pump()?;
     let mut grain_multiplier: u16 = 1;
-    println!("Grain: {grain_multiplier}x (press number keys 0-9 to change)");
+    println!("Indexed mode | Grain: {grain_multiplier}x (press number keys 0-9 to change)");
     'running: loop {
         for event in events.poll_iter() {
             match event {
@@ -89,7 +148,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !repeat {
                         if let Some(d) = digit_from_keycode(keycode) {
                             grain_multiplier = d;
-                            println!("Key: {:?} -> Grain: {grain_multiplier}x", keycode);
+                            noise = make_noise_buffer_for_grain(
+                                width as usize,
+                                height as usize,
+                                0x5EED_F00D,
+                                grain_multiplier,
+                            );
+                            let range_hi = grain_multiplier.saturating_mul(256).saturating_sub(1);
+                            println!(
+                                "Key: {:?} -> Grain: {grain_multiplier}x (adds 0..{})",
+                                keycode, range_hi
+                            );
                         }
                     }
                 }
@@ -105,7 +174,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             gradient16 = make_gradient_buffer16(width as usize, height as usize);
-            noise9 = make_noise_buffer9(width as usize, height as usize, 0x5EED_F00D);
+            noise = make_noise_buffer_for_grain(
+                width as usize,
+                height as usize,
+                0x5EED_F00D,
+                grain_multiplier,
+            );
         }
 
         texture
@@ -114,14 +188,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let row = &mut buf[y * pitch..(y + 1) * pitch];
                     for x in 0..width as usize {
                         let idx = y * width as usize + x;
-                        let noise_term = noise9[idx].saturating_mul(grain_multiplier);
+                        let noise_term = noise[idx];
                         let blended16 = gradient16[idx].saturating_add(noise_term);
                         let c = (blended16 >> 8) as u8;
                         let off = x * 4;
                         // ARGB8888 little-endian memory order: B, G, R, A.
-                        row[off] = c;
-                        row[off + 1] = c;
-                        row[off + 2] = c;
+                        let [r, g, b] = palette256[c as usize];
+                        row[off] = b;
+                        row[off + 1] = g;
+                        row[off + 2] = r;
                         row[off + 3] = 0xFF;
                     }
                 }
