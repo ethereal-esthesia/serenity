@@ -60,7 +60,14 @@ cd /Users/shane/Project/serenity
 cargo run
 ```
 
-This is the default gradient-only renderer.
+This is the default animated top-down ocean renderer (palette + debanding filter).
+
+Optional debug output (includes fps):
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run -- --debug
+```
 
 Optional screenshot:
 

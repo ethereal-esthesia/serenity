@@ -39,7 +39,7 @@ cd /Users/shane/Project/serenity
 cargo run
 ```
 
-Default run is gradient-only (no runtime mode toggles).
+Default run is an animated top-down ocean renderer (neon-accent night style) using the project palette and debanding filter pipeline.
 
 Controls:
 - `Esc`: quit
@@ -49,6 +49,13 @@ Optional screenshot output:
 ```bash
 cd /Users/shane/Project/serenity
 cargo run -- --screenshot /tmp/serenity_main.ppm
+```
+
+Optional debug output (init + fps):
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run -- --debug
 ```
 
 Interactive noise test (non-default):
