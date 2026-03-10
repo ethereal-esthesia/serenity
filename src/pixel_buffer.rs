@@ -179,6 +179,14 @@ impl PixelBuffer {
         self.dirty = true;
     }
 
+    pub fn base_mut(&mut self) -> &mut [u16] {
+        &mut self.base16
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn set_detail(&mut self, detail16: Vec<u16>) {
         assert_eq!(detail16.len(), self.width * self.height);
         self.detail16 = detail16;
