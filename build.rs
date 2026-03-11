@@ -9,6 +9,7 @@ fn main() {
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let script = format!("{}/scripts/docs/render_diagrams.sh", manifest_dir);
+    let verify_script = format!("{}/scripts/docs/verify_docs.sh", manifest_dir);
     let docs_dir = format!("{}/docs", manifest_dir);
 
     if let Ok(entries) = fs::read_dir(&docs_dir) {
@@ -22,6 +23,10 @@ fn main() {
 
     if !Path::new(&script).exists() {
         println!("cargo:warning=Docs render script missing at {}", script);
+        return;
+    }
+    if !Path::new(&verify_script).exists() {
+        println!("cargo:warning=Docs verify script missing at {}", verify_script);
         return;
     }
 
@@ -43,6 +48,17 @@ fn main() {
                 "cargo:warning=Failed to run diagram render script: {} (continuing build)",
                 err
             );
+        }
+    }
+
+    let verify_status = Command::new(&verify_script).current_dir(&manifest_dir).status();
+    match verify_status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            panic!("Docs policy verification failed with status {}", s);
+        }
+        Err(err) => {
+            panic!("Failed to run docs policy verification: {}", err);
         }
     }
 }
