@@ -27,6 +27,13 @@ struct FpsCounter {
     frames: u64,
 }
 
+struct RenderState<'a> {
+    width: u32,
+    height: u32,
+    texture: sdl3::render::Texture<'a>,
+    pixels: PixelBuffer,
+}
+
 impl FpsCounter {
     fn new() -> Self {
         Self {
@@ -152,14 +159,14 @@ impl Default for NeonPatternParams {
     }
 }
 
-fn build_render_targets<'a>(
+fn build_render_state<'a>(
     texture_creator: &'a sdl3::render::TextureCreator<sdl3::video::WindowContext>,
     width: u32,
     height: u32,
     debug: bool,
     palette: Palette256,
     deband: DebandConfig,
-) -> Result<(sdl3::render::Texture<'a>, PixelBuffer), Box<dyn std::error::Error>> {
+) -> Result<RenderState<'a>, Box<dyn std::error::Error>> {
     let texture = texture_creator
         .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -176,7 +183,12 @@ fn build_render_targets<'a>(
             deband.dist, deband.shift, deband.seed
         );
     }
-    Ok((texture, pixels))
+    Ok(RenderState {
+        width,
+        height,
+        texture,
+        pixels,
+    })
 }
 
 fn render_neon_pattern_frame(
@@ -226,6 +238,20 @@ fn render_neon_pattern_frame(
     }
 }
 
+fn should_quit(events: &mut sdl3::EventPump) -> bool {
+    for event in events.poll_iter() {
+        match event {
+            Event::Quit { .. } => return true,
+            Event::KeyDown {
+                keycode: Some(Keycode::Escape),
+                ..
+            } => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let run = parse_args()?;
     let debug = run.debug;
@@ -261,10 +287,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = canvas.present();
 
     let texture_creator = canvas.texture_creator();
-    let mut width = initial_width;
-    let mut height = initial_height;
-    let (mut texture, mut pixels) =
-        build_render_targets(&texture_creator, width, height, debug, palette, deband)?;
+    let mut render =
+        build_render_state(&texture_creator, initial_width, initial_height, debug, palette, deband)?;
 
     let mut events = sdl.event_pump()?;
     let mut fps_counter = FpsCounter::new();
@@ -273,35 +297,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
     'running: loop {
-        for event in events.poll_iter() {
-            match event {
-                Event::Quit { .. } => break 'running,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'running,
-                _ => {}
-            }
+        if should_quit(&mut events) {
+            break 'running;
         }
 
         let (current_w, current_h) = canvas.output_size()?;
-        if current_w > 0 && current_h > 0 && (current_w != width || current_h != height) {
-            width = current_w;
-            height = current_h;
-            (texture, pixels) =
-                build_render_targets(&texture_creator, width, height, debug, palette, deband)?;
+        if current_w > 0
+            && current_h > 0
+            && (current_w != render.width || current_h != render.height)
+        {
+            render =
+                build_render_state(&texture_creator, current_w, current_h, debug, palette, deband)?;
         }
 
         let t = neon_start.elapsed().as_secs_f32();
-        render_neon_pattern_frame(width as usize, height as usize, t, neon, pixels.base_mut());
-        pixels.mark_dirty();
-        pixels.upload_to_texture(&mut texture)?;
+        render_neon_pattern_frame(
+            render.width as usize,
+            render.height as usize,
+            t,
+            neon,
+            render.pixels.base_mut(),
+        );
+        render.pixels.mark_dirty();
+        render.pixels.upload_to_texture(&mut render.texture)?;
         if let Some(path) = screenshot_path.take() {
-            pixels.write_ppm(&path)?;
+            render.pixels.write_ppm(&path)?;
             println!("[main:screenshot] wrote {}", path);
         }
 
-        canvas.copy(&texture, None, None)?;
+        canvas.copy(&render.texture, None, None)?;
         let _ = canvas.present();
         if !window_shown {
             canvas.window_mut().show();
