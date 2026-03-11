@@ -53,6 +53,8 @@ Controls:
 - HUD input debug (top-left):
   - `KEYS`: currently pressed non-modifier keys (chord-friendly)
   - `MODS`: currently pressed modifier keys (left/right variants)
+  - On macOS, app attempts global key capture via `CGEventTap` (system-wide while running).
+  - If macOS permissions are missing, it falls back to local window-focused capture and prints a status line.
 
 Optional screenshot output:
 

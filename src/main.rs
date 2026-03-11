@@ -1,4 +1,5 @@
 use serenity::cli::{CommonRunConfig, parse_common_args_from};
+use serenity::global_input::{GlobalInputCapture, ModifierState};
 use sdl3::event::Event;
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::pixels::Color;
@@ -452,6 +453,35 @@ fn draw_key_debug_hud(
     Ok(())
 }
 
+fn modifier_state_to_sdl_mod(mods: ModifierState) -> Mod {
+    let mut out = Mod::NOMOD;
+    if mods.lshift {
+        out |= Mod::LSHIFTMOD;
+    }
+    if mods.rshift {
+        out |= Mod::RSHIFTMOD;
+    }
+    if mods.lctrl {
+        out |= Mod::LCTRLMOD;
+    }
+    if mods.rctrl {
+        out |= Mod::RCTRLMOD;
+    }
+    if mods.lalt {
+        out |= Mod::LALTMOD;
+    }
+    if mods.ralt {
+        out |= Mod::RALTMOD;
+    }
+    if mods.lgui {
+        out |= Mod::LGUIMOD;
+    }
+    if mods.rgui {
+        out |= Mod::RGUIMOD;
+    }
+    out
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let run = parse_args()?;
     let debug = run.debug;
@@ -495,6 +525,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let neon_start = Instant::now();
     let mut window_shown = false;
     let mut keys_down: Vec<String> = Vec::new();
+    let global_capture = GlobalInputCapture::start();
+    let mut last_capture_status: Option<String> = None;
     println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
     'running: loop {
@@ -527,8 +559,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         canvas.copy(&render.texture, None, None)?;
-        let mods = sdl.keyboard().mod_state();
-        draw_key_debug_hud(&mut canvas, &keys_down, mods)?;
+        let snap = global_capture.snapshot();
+        if snap.status != last_capture_status {
+            if let Some(msg) = &snap.status {
+                println!("[input] {}", msg);
+            }
+            last_capture_status = snap.status.clone();
+        }
+        let (hud_keys, hud_mods) = if snap.active {
+            (snap.keys_down, modifier_state_to_sdl_mod(snap.mods))
+        } else {
+            (keys_down.clone(), sdl.keyboard().mod_state())
+        };
+        draw_key_debug_hud(&mut canvas, &hud_keys, hud_mods)?;
         let _ = canvas.present();
         if !window_shown {
             canvas.window_mut().show();
