@@ -9,6 +9,7 @@ use serenity::pixel_buffer::{
 use std::f32::consts::TAU;
 use std::time::Instant;
 
+#[derive(Debug, Default, PartialEq, Eq)]
 struct RunConfig {
     debug: bool,
     screenshot_path: Option<String>,
@@ -49,12 +50,11 @@ impl FpsCounter {
     }
 }
 
-fn parse_args() -> Result<RunConfig, Box<dyn std::error::Error>> {
-    let mut config = RunConfig {
-        debug: false,
-        screenshot_path: None,
-    };
-    let mut args = std::env::args().skip(1);
+fn parse_args_from(
+    args: impl IntoIterator<Item = String>,
+) -> Result<RunConfig, Box<dyn std::error::Error>> {
+    let mut config = RunConfig::default();
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--debug" => config.debug = true,
@@ -73,10 +73,83 @@ fn parse_args() -> Result<RunConfig, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
+fn parse_args() -> Result<RunConfig, Box<dyn std::error::Error>> {
+    parse_args_from(std::env::args().skip(1))
+}
+
 #[inline]
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NeonPatternParams {
+    w1_freq: f32,
+    w1_speed: f32,
+    w2_freq: f32,
+    w2_speed: f32,
+    w3_freq: f32,
+    w3_speed: f32,
+    w4_freq: f32,
+    w4_speed: f32,
+    depth_base: f32,
+    depth_w1: f32,
+    depth_w2: f32,
+    depth_w3: f32,
+    shimmer_min: f32,
+    lane_a_min: f32,
+    lane_b_min: f32,
+    lane_a_u: f32,
+    lane_a_v: f32,
+    lane_a_speed: f32,
+    lane_b_u: f32,
+    lane_b_v: f32,
+    lane_b_speed: f32,
+    neon_a_weight: f32,
+    neon_b_weight: f32,
+    neon_mix_base: f32,
+    neon_mix_shimmer: f32,
+    base_bias: f32,
+    depth_gain: f32,
+    shimmer_gain: f32,
+    neon_gain: f32,
+}
+
+impl Default for NeonPatternParams {
+    fn default() -> Self {
+        Self {
+            w1_freq: 13.0,
+            w1_speed: 0.07,
+            w2_freq: 17.0,
+            w2_speed: 0.09,
+            w3_freq: 9.0,
+            w3_speed: 0.05,
+            w4_freq: 21.0,
+            w4_speed: 0.11,
+            depth_base: 0.50,
+            depth_w1: 0.19,
+            depth_w2: 0.14,
+            depth_w3: 0.10,
+            shimmer_min: 0.70,
+            lane_a_min: 0.84,
+            lane_b_min: 0.88,
+            lane_a_u: 31.0,
+            lane_a_v: 7.0,
+            lane_a_speed: 0.13,
+            lane_b_u: 7.0,
+            lane_b_v: 29.0,
+            lane_b_speed: 0.16,
+            neon_a_weight: 0.7,
+            neon_b_weight: 0.5,
+            neon_mix_base: 0.35,
+            neon_mix_shimmer: 0.65,
+            base_bias: 6500.0,
+            depth_gain: 30000.0,
+            shimmer_gain: 4500.0,
+            neon_gain: 15500.0,
+        }
+    }
 }
 
 fn build_render_targets<'a>(
@@ -106,7 +179,13 @@ fn build_render_targets<'a>(
     Ok((texture, pixels))
 }
 
-fn render_neon_pattern_frame(width: usize, height: usize, t: f32, base: &mut [u16]) {
+fn render_neon_pattern_frame(
+    width: usize,
+    height: usize,
+    t: f32,
+    params: NeonPatternParams,
+    base: &mut [u16],
+) {
     let w = width as f32;
     let h = height as f32;
     for y in 0..height {
@@ -116,19 +195,31 @@ fn render_neon_pattern_frame(width: usize, height: usize, t: f32, base: &mut [u1
             let i = y * width + x;
 
             // Layered wave field for top-down ocean motion.
-            let w1 = ((u * 13.0 + t * 0.07) * TAU).sin();
-            let w2 = ((v * 17.0 - t * 0.09) * TAU).sin();
-            let w3 = (((u + v) * 9.0 + t * 0.05) * TAU).sin();
-            let w4 = (((u - v) * 21.0 - t * 0.11) * TAU).sin();
+            let w1 = ((u * params.w1_freq + t * params.w1_speed) * TAU).sin();
+            let w2 = ((v * params.w2_freq - t * params.w2_speed) * TAU).sin();
+            let w3 = (((u + v) * params.w3_freq + t * params.w3_speed) * TAU).sin();
+            let w4 = (((u - v) * params.w4_freq - t * params.w4_speed) * TAU).sin();
 
-            let depth = 0.50 + 0.19 * w1 + 0.14 * w2 + 0.10 * w3;
-            let shimmer = smoothstep(0.70, 1.0, w4);
-            let lane_a = smoothstep(0.84, 1.0, ((u * 31.0 + v * 7.0 - t * 0.13) * TAU).sin());
-            let lane_b = smoothstep(0.88, 1.0, ((u * 7.0 - v * 29.0 + t * 0.16) * TAU).sin());
-            let neon = (lane_a * 0.7 + lane_b * 0.5) * (0.35 + 0.65 * shimmer);
+            let depth = params.depth_base + params.depth_w1 * w1 + params.depth_w2 * w2 + params.depth_w3 * w3;
+            let shimmer = smoothstep(params.shimmer_min, 1.0, w4);
+            let lane_a = smoothstep(
+                params.lane_a_min,
+                1.0,
+                ((u * params.lane_a_u + v * params.lane_a_v - t * params.lane_a_speed) * TAU).sin(),
+            );
+            let lane_b = smoothstep(
+                params.lane_b_min,
+                1.0,
+                ((u * params.lane_b_u - v * params.lane_b_v + t * params.lane_b_speed) * TAU).sin(),
+            );
+            let neon = (lane_a * params.neon_a_weight + lane_b * params.neon_b_weight)
+                * (params.neon_mix_base + params.neon_mix_shimmer * shimmer);
 
             // Keep the same palette, but drive it with deeper mids + neon accents.
-            let mut v16 = 6500.0 + depth * 30000.0 + shimmer * 4500.0 + neon * 15500.0;
+            let mut v16 = params.base_bias
+                + depth * params.depth_gain
+                + shimmer * params.shimmer_gain
+                + neon * params.neon_gain;
             v16 = v16.clamp(0.0, 65535.0);
             base[i] = v16 as u16;
         }
@@ -144,6 +235,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shift: -2,
         dist: DebandingDistribution::Gaussian,
     };
+    let neon = NeonPatternParams::default();
     let palette = Palette256::SoftSky;
     if debug {
         println!("[main] debug enabled");
@@ -201,7 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let t = neon_start.elapsed().as_secs_f32();
-        render_neon_pattern_frame(width as usize, height as usize, t, pixels.base_mut());
+        render_neon_pattern_frame(width as usize, height as usize, t, neon, pixels.base_mut());
         pixels.mark_dirty();
         pixels.upload_to_texture(&mut texture)?;
         if let Some(path) = screenshot_path.take() {
@@ -217,10 +309,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window_shown = true;
         }
         if debug && let Some((fps, frame_ms)) = fps_counter.tick() {
-                println!("[main:fps] fps={:.1} frame_ms={:.3}", fps, frame_ms);
+            println!("[main:fps] fps={:.1} frame_ms={:.3}", fps, frame_ms);
         }
     }
 
     sdl.mouse().show_cursor(true);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunConfig;
+    use super::parse_args_from;
+
+    #[test]
+    fn parse_args_defaults() {
+        let cfg = parse_args_from(Vec::new()).expect("default parse should succeed");
+        assert_eq!(cfg, RunConfig::default());
+    }
+
+    #[test]
+    fn parse_args_debug_and_screenshot() {
+        let cfg = parse_args_from(vec![
+            "--debug".to_string(),
+            "--screenshot".to_string(),
+            "/tmp/test.ppm".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            cfg,
+            RunConfig {
+                debug: true,
+                screenshot_path: Some("/tmp/test.ppm".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_missing_screenshot_path() {
+        let err = parse_args_from(vec!["--screenshot".to_string()]).expect_err("missing path should fail");
+        assert!(err.to_string().contains("requires a file path"));
+    }
 }
