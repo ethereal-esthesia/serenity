@@ -1,3 +1,4 @@
+use serenity::cli::{CommonRunConfig, parse_common_args_from};
 use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
 use sdl3::pixels::Color;
@@ -9,11 +10,7 @@ use serenity::pixel_buffer::{
 use std::f32::consts::TAU;
 use std::time::Instant;
 
-#[derive(Debug, Default, PartialEq, Eq)]
-struct RunConfig {
-    debug: bool,
-    screenshot_path: Option<String>,
-}
+type RunConfig = CommonRunConfig;
 
 #[derive(Clone, Copy, Debug)]
 struct DebandConfig {
@@ -57,31 +54,8 @@ impl FpsCounter {
     }
 }
 
-fn parse_args_from(
-    args: impl IntoIterator<Item = String>,
-) -> Result<RunConfig, Box<dyn std::error::Error>> {
-    let mut config = RunConfig::default();
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--debug" => config.debug = true,
-            "--screenshot" => {
-                let path = args.next().ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "--screenshot requires a file path",
-                    )
-                })?;
-                config.screenshot_path = Some(path);
-            }
-            _ => {}
-        }
-    }
-    Ok(config)
-}
-
 fn parse_args() -> Result<RunConfig, Box<dyn std::error::Error>> {
-    parse_args_from(std::env::args().skip(1))
+    parse_common_args_from(std::env::args().skip(1))
 }
 
 #[inline]
@@ -339,39 +313,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     sdl.mouse().show_cursor(true);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::RunConfig;
-    use super::parse_args_from;
-
-    #[test]
-    fn parse_args_defaults() {
-        let cfg = parse_args_from(Vec::new()).expect("default parse should succeed");
-        assert_eq!(cfg, RunConfig::default());
-    }
-
-    #[test]
-    fn parse_args_debug_and_screenshot() {
-        let cfg = parse_args_from(vec![
-            "--debug".to_string(),
-            "--screenshot".to_string(),
-            "/tmp/test.ppm".to_string(),
-        ])
-        .expect("parse should succeed");
-        assert_eq!(
-            cfg,
-            RunConfig {
-                debug: true,
-                screenshot_path: Some("/tmp/test.ppm".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_args_rejects_missing_screenshot_path() {
-        let err = parse_args_from(vec!["--screenshot".to_string()]).expect_err("missing path should fail");
-        assert!(err.to_string().contains("requires a file path"));
-    }
 }

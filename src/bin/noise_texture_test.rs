@@ -5,16 +5,14 @@ use sdl3::pixels::PixelFormatEnum;
 use std::time::Instant;
 use std::{io::Write, path::Path};
 
+use serenity::cli::{CommonRunConfig, parse_common_args_from};
 use serenity::fast_rng::FastRng;
 use serenity::palette::{Palette256, palette_256};
 
 const PANEL_SIZE: usize = 32;
 const NOISE_SEED: u64 = 0x5EED_F00D;
 
-#[derive(Debug, Default, PartialEq, Eq)]
-struct RunConfig {
-    screenshot_path: Option<String>,
-}
+type RunConfig = CommonRunConfig;
 
 struct RenderState<'a> {
     width: u32,
@@ -361,27 +359,8 @@ fn write_scene_ppm<P: AsRef<Path>>(
     Ok(())
 }
 
-fn parse_args_from(
-    args: impl IntoIterator<Item = String>,
-) -> Result<RunConfig, Box<dyn std::error::Error>> {
-    let mut config = RunConfig::default();
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        if arg == "--screenshot" {
-            let path = args.next().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "--screenshot requires a file path",
-                )
-            })?;
-            config.screenshot_path = Some(path);
-        }
-    }
-    Ok(config)
-}
-
 fn parse_args() -> Result<RunConfig, Box<dyn std::error::Error>> {
-    parse_args_from(std::env::args().skip(1))
+    parse_common_args_from(std::env::args().skip(1))
 }
 
 fn build_render_state<'a>(
@@ -516,33 +495,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     sdl.mouse().show_cursor(true);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{RunConfig, parse_args_from};
-
-    #[test]
-    fn parse_args_defaults() {
-        let cfg = parse_args_from(Vec::new()).expect("default parse should succeed");
-        assert_eq!(cfg, RunConfig::default());
-    }
-
-    #[test]
-    fn parse_args_screenshot() {
-        let cfg = parse_args_from(vec!["--screenshot".to_string(), "/tmp/noise.ppm".to_string()])
-            .expect("parse should succeed");
-        assert_eq!(
-            cfg,
-            RunConfig {
-                screenshot_path: Some("/tmp/noise.ppm".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_args_rejects_missing_screenshot_path() {
-        let err = parse_args_from(vec!["--screenshot".to_string()]).expect_err("missing path should fail");
-        assert!(err.to_string().contains("requires a file path"));
-    }
 }
