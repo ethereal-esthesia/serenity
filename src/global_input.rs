@@ -201,7 +201,10 @@ mod macos {
                 _ => {}
             }
         }
-        event
+        match event_type {
+            K_CG_EVENT_KEY_DOWN | K_CG_EVENT_KEY_UP | K_CG_EVENT_FLAGS_CHANGED => std::ptr::null_mut(),
+            _ => event,
+        }
     }
 
     fn is_modifier_keycode(keycode: u16) -> bool {

@@ -609,6 +609,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (hud_keys, hud_mods) = if let Some(capture) = &global_capture {
             let snap = capture.snapshot();
             if snap.active {
+                if snap.keys_down.iter().any(|k| k == "ESCAPE") {
+                    break 'running;
+                }
                 (snap.keys_down, modifier_state_to_sdl_mod(snap.mods))
             } else {
                 (keys_down.clone(), sdl.keyboard().mod_state())
