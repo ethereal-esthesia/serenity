@@ -50,6 +50,9 @@ cargo run --release
 
 Controls:
 - `Esc`: quit
+- HUD input debug (top-left):
+  - `KEYS`: currently pressed non-modifier keys (chord-friendly)
+  - `MODS`: currently pressed modifier keys (left/right variants)
 
 Optional screenshot output:
 

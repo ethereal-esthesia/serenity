@@ -1,8 +1,9 @@
 use serenity::cli::{CommonRunConfig, parse_common_args_from};
 use sdl3::event::Event;
-use sdl3::keyboard::Keycode;
+use sdl3::keyboard::{Keycode, Mod};
 use sdl3::pixels::Color;
 use sdl3::pixels::PixelFormatEnum;
+use sdl3::rect::Rect;
 use serenity::palette::{Palette256, palette_256};
 use serenity::pixel_buffer::{
     DebandingDistribution, DebandingFilter, PixelBuffer, make_gradient_buffer16,
@@ -212,18 +213,243 @@ fn render_neon_pattern_frame(
     }
 }
 
-fn should_quit(events: &mut sdl3::EventPump) -> bool {
+fn keycode_label(keycode: Keycode) -> String {
+    format!("{:?}", keycode)
+        .to_uppercase()
+        .replace('_', " ")
+        .replace(':', " ")
+        .replace(',', " ")
+}
+
+fn process_events(events: &mut sdl3::EventPump, keys_down: &mut Vec<String>) -> bool {
+    let is_modifier = |keycode: Keycode| {
+        matches!(
+            keycode,
+            Keycode::LShift
+                | Keycode::RShift
+                | Keycode::LCtrl
+                | Keycode::RCtrl
+                | Keycode::LAlt
+                | Keycode::RAlt
+                | Keycode::LGui
+                | Keycode::RGui
+        )
+    };
+
     for event in events.poll_iter() {
         match event {
             Event::Quit { .. } => return true,
             Event::KeyDown {
-                keycode: Some(Keycode::Escape),
+                keycode: Some(keycode),
+                repeat: false,
                 ..
-            } => return true,
+            } => {
+                if keycode == Keycode::Escape {
+                    return true;
+                }
+                if !is_modifier(keycode) {
+                    let label = keycode_label(keycode);
+                    if !keys_down.contains(&label) {
+                        keys_down.push(label);
+                    }
+                }
+            }
+            Event::KeyUp {
+                keycode: Some(keycode),
+                repeat: false,
+                ..
+            } => {
+                if !is_modifier(keycode) {
+                    let label = keycode_label(keycode);
+                    keys_down.retain(|k| k != &label);
+                }
+            }
             _ => {}
         }
     }
     false
+}
+
+fn glyph_5x7(ch: char) -> [u8; 7] {
+    match ch {
+        'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        'B' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+        'C' => [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
+        'D' => [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
+        'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+        'F' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+        'G' => [0x0E, 0x11, 0x10, 0x13, 0x11, 0x11, 0x0E],
+        'H' => [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        'I' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F],
+        'J' => [0x07, 0x02, 0x02, 0x02, 0x12, 0x12, 0x0C],
+        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+        'M' => [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
+        'N' => [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
+        'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+        'Q' => [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
+        'R' => [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+        'S' => [0x0E, 0x11, 0x10, 0x0E, 0x01, 0x11, 0x0E],
+        'T' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        'V' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
+        'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A],
+        'X' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+        'Y' => [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
+        'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+        '2' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
+        '3' => [0x1F, 0x01, 0x02, 0x06, 0x01, 0x11, 0x0E],
+        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+        '5' => [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+        '6' => [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+        ' ' => [0x00; 7],
+        '_' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
+        '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        '+' => [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
+        '/' => [0x01, 0x02, 0x04, 0x08, 0x10, 0x00, 0x00],
+        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06],
+        _ => [0x1F, 0x01, 0x02, 0x04, 0x00, 0x04, 0x00], // '?'
+    }
+}
+
+fn draw_rounded_box(
+    canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    radius: i32,
+    color: Color,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let w_i32 = w as i32;
+    let h_i32 = h as i32;
+    let r = radius.max(0).min((w_i32.min(h_i32)) / 2);
+    canvas.set_draw_color(color);
+    canvas.fill_rect(Rect::new(x + r, y, (w_i32 - 2 * r) as u32, h))?;
+    canvas.fill_rect(Rect::new(x, y + r, r as u32, (h_i32 - 2 * r) as u32))?;
+    canvas.fill_rect(Rect::new(
+        x + w_i32 - r,
+        y + r,
+        r as u32,
+        (h_i32 - 2 * r) as u32,
+    ))?;
+
+    for dy in 0..r {
+        for dx in 0..r {
+            if dx * dx + dy * dy <= r * r {
+                canvas.fill_rect(Rect::new(x + r - 1 - dx, y + r - 1 - dy, 1, 1))?;
+                canvas.fill_rect(Rect::new(x + w_i32 - r + dx, y + r - 1 - dy, 1, 1))?;
+                canvas.fill_rect(Rect::new(x + r - 1 - dx, y + h_i32 - r + dy, 1, 1))?;
+                canvas.fill_rect(Rect::new(x + w_i32 - r + dx, y + h_i32 - r + dy, 1, 1))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn draw_text_5x7(
+    canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+    x: i32,
+    y: i32,
+    text: &str,
+    scale: i32,
+    color: Color,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let s = scale.max(1);
+    canvas.set_draw_color(color);
+    for (ci, ch) in text.chars().enumerate() {
+        let glyph = glyph_5x7(ch);
+        let bx = x + (ci as i32) * (6 * s);
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..5 {
+                if (bits >> (4 - col)) & 1 == 1 {
+                    canvas.fill_rect(Rect::new(
+                        bx + col * s,
+                        y + (row as i32) * s,
+                        s as u32,
+                        s as u32,
+                    ))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn draw_key_debug_hud(
+    canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+    keys_down: &[String],
+    mods: Mod,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let row1_text = if keys_down.is_empty() {
+        "KEYS".to_string()
+    } else {
+        format!("KEYS {}", keys_down.join(" + "))
+    };
+    let row1_scale = 2i32;
+    let row1_w = (row1_text.chars().count() as i32 * 6 - 1) * row1_scale;
+    let row1_h = 7 * row1_scale;
+    let row2_scale = 1i32;
+    let row2_h = 7 * row2_scale;
+    let mut mods_active: Vec<&str> = Vec::new();
+    if mods.contains(Mod::LSHIFTMOD) {
+        mods_active.push("LSHIFT");
+    }
+    if mods.contains(Mod::RSHIFTMOD) {
+        mods_active.push("RSHIFT");
+    }
+    if mods.contains(Mod::LCTRLMOD) {
+        mods_active.push("LCTRL");
+    }
+    if mods.contains(Mod::RCTRLMOD) {
+        mods_active.push("RCTRL");
+    }
+    if mods.contains(Mod::LALTMOD) {
+        mods_active.push("LALT");
+    }
+    if mods.contains(Mod::RALTMOD) {
+        mods_active.push("RALT");
+    }
+    if mods.contains(Mod::LGUIMOD) {
+        mods_active.push("LGUI");
+    }
+    if mods.contains(Mod::RGUIMOD) {
+        mods_active.push("RGUI");
+    }
+    let row2_text = if mods_active.is_empty() {
+        "MODS".to_string()
+    } else {
+        format!("MODS {}", mods_active.join(" "))
+    };
+    let row2_w = (row2_text.chars().count() as i32 * 6 - 1) * row2_scale;
+
+    let pad = 10i32;
+    let box_w = (row1_w.max(row2_w) + pad * 2).max(140) as u32;
+    let box_h = (row1_h + row2_h + pad * 3) as u32;
+    draw_rounded_box(canvas, 12, 12, box_w, box_h, 10, Color::RGB(16, 24, 36))?;
+    draw_text_5x7(
+        canvas,
+        12 + pad,
+        12 + pad,
+        &row1_text,
+        row1_scale,
+        Color::RGB(210, 232, 255),
+    )?;
+    draw_text_5x7(
+        canvas,
+        12 + pad,
+        12 + pad * 2 + row1_h,
+        &row2_text,
+        row2_scale,
+        Color::RGB(186, 200, 220),
+    )?;
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -268,10 +494,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fps_counter = FpsCounter::new();
     let neon_start = Instant::now();
     let mut window_shown = false;
+    let mut keys_down: Vec<String> = Vec::new();
     println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
     'running: loop {
-        if should_quit(&mut events) {
+        if process_events(&mut events, &mut keys_down) {
             break 'running;
         }
 
@@ -300,6 +527,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         canvas.copy(&render.texture, None, None)?;
+        let mods = sdl.keyboard().mod_state();
+        draw_key_debug_hud(&mut canvas, &keys_down, mods)?;
         let _ = canvas.present();
         if !window_shown {
             canvas.window_mut().show();
