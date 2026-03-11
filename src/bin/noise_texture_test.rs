@@ -11,6 +11,80 @@ use serenity::palette::{Palette256, palette_256};
 const PANEL_SIZE: usize = 32;
 const NOISE_SEED: u64 = 0x5EED_F00D;
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RunConfig {
+    screenshot_path: Option<String>,
+}
+
+struct RenderState<'a> {
+    width: u32,
+    height: u32,
+    texture: sdl3::render::Texture<'a>,
+    scene: SceneBuffers,
+}
+
+struct PerfStats {
+    start: Instant,
+    frames: u64,
+    draw_ms_total: f64,
+    present_ms_total: f64,
+    resize_rebuilds: u64,
+}
+
+impl PerfStats {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            frames: 0,
+            draw_ms_total: 0.0,
+            present_ms_total: 0.0,
+            resize_rebuilds: 0,
+        }
+    }
+
+    fn record_draw_ms(&mut self, draw_ms: f64) {
+        self.draw_ms_total += draw_ms;
+    }
+
+    fn record_present_ms(&mut self, present_ms: f64) {
+        self.present_ms_total += present_ms;
+        self.frames += 1;
+    }
+
+    fn record_resize_rebuild(&mut self) {
+        self.resize_rebuilds += 1;
+    }
+
+    fn maybe_print_and_reset(&mut self, cfg: NoiseConfig) {
+        let elapsed = self.start.elapsed();
+        if elapsed.as_secs_f64() < 1.0 || self.frames == 0 {
+            return;
+        }
+        let secs = elapsed.as_secs_f64();
+        let fps = self.frames as f64 / secs;
+        let frame_ms = (secs * 1000.0) / self.frames as f64;
+        let draw_ms = self.draw_ms_total / self.frames as f64;
+        let present_ms = self.present_ms_total / self.frames as f64;
+        println!(
+            "stats: mode={} shift={} panel={} black={} fps={:.1} frame_ms={:.3} draw_ms={:.3} present_ms={:.3} resize_rebuilds={}",
+            cfg.mode.label(),
+            cfg.shift,
+            cfg.panel_mode,
+            cfg.black_screen_mode,
+            fps,
+            frame_ms,
+            draw_ms,
+            present_ms,
+            self.resize_rebuilds
+        );
+        self.start = Instant::now();
+        self.frames = 0;
+        self.draw_ms_total = 0.0;
+        self.present_ms_total = 0.0;
+        self.resize_rebuilds = 0;
+    }
+}
+
 fn make_gradient_buffer16(width: usize, height: usize) -> Vec<u16> {
     let mut out = vec![0u16; width * height];
     let max_sum = (width - 1) + (height - 1);
@@ -287,9 +361,11 @@ fn write_scene_ppm<P: AsRef<Path>>(
     Ok(())
 }
 
-fn parse_args() -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let mut screenshot_path: Option<String> = None;
-    let mut args = std::env::args().skip(1);
+fn parse_args_from(
+    args: impl IntoIterator<Item = String>,
+) -> Result<RunConfig, Box<dyn std::error::Error>> {
+    let mut config = RunConfig::default();
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--screenshot" {
             let path = args.next().ok_or_else(|| {
@@ -298,14 +374,65 @@ fn parse_args() -> Result<Option<String>, Box<dyn std::error::Error>> {
                     "--screenshot requires a file path",
                 )
             })?;
-            screenshot_path = Some(path);
+            config.screenshot_path = Some(path);
         }
     }
-    Ok(screenshot_path)
+    Ok(config)
+}
+
+fn parse_args() -> Result<RunConfig, Box<dyn std::error::Error>> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn build_render_state<'a>(
+    texture_creator: &'a sdl3::render::TextureCreator<sdl3::video::WindowContext>,
+    width: u32,
+    height: u32,
+    cfg: NoiseConfig,
+) -> Result<RenderState<'a>, Box<dyn std::error::Error>> {
+    let texture = texture_creator
+        .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let scene = rebuild_scene_buffers(width as usize, height as usize, cfg);
+    Ok(RenderState {
+        width,
+        height,
+        texture,
+        scene,
+    })
+}
+
+fn process_events(
+    events: &mut sdl3::EventPump,
+    cfg: &mut NoiseConfig,
+    render: &mut RenderState<'_>,
+) -> bool {
+    for event in events.poll_iter() {
+        match event {
+            Event::Quit { .. } => return true,
+            Event::KeyDown {
+                keycode: Some(Keycode::Escape),
+                ..
+            } => return true,
+            Event::KeyDown {
+                keycode: Some(keycode),
+                repeat: false,
+                ..
+            } => handle_keydown(
+                keycode,
+                cfg,
+                render.width as usize,
+                render.height as usize,
+                &mut render.scene,
+            ),
+            _ => {}
+        }
+    }
+    false
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut screenshot_path = parse_args()?;
+    let mut run = parse_args()?;
     let palette256 = palette_256(Palette256::SoftSky);
 
     let sdl = sdl3::init()?;
@@ -327,20 +454,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = canvas.present();
 
     let texture_creator = canvas.texture_creator();
-    let mut width = initial_width;
-    let mut height = initial_height;
-    let mut texture = texture_creator
-        .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut cfg = NoiseConfig::default();
-    let mut scene = rebuild_scene_buffers(width as usize, height as usize, cfg);
+    let mut render = build_render_state(&texture_creator, initial_width, initial_height, cfg)?;
 
     let mut events = sdl.event_pump()?;
-    let mut stats_start = Instant::now();
-    let mut stats_frames: u64 = 0;
-    let mut stats_draw_ms_total: f64 = 0.0;
-    let mut stats_present_ms_total: f64 = 0.0;
-    let mut stats_resize_rebuilds: u64 = 0;
+    let mut stats = PerfStats::new();
     let mut window_shown = false;
     #[cfg(debug_assertions)]
     println!("Debug build detected: run `cargo run --release --bin noise_texture_test` for real perf numbers.");
@@ -349,92 +467,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     print_config("Current:", cfg);
     'running: loop {
-        for event in events.poll_iter() {
-            match event {
-                Event::Quit { .. } => break 'running,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'running,
-                Event::KeyDown {
-                    keycode: Some(keycode),
-                    repeat: false,
-                    ..
-                } => handle_keydown(keycode, &mut cfg, width as usize, height as usize, &mut scene),
-                _ => {}
-            }
+        if process_events(&mut events, &mut cfg, &mut render) {
+            break 'running;
         }
 
         let (current_w, current_h) = canvas.output_size()?;
-        if current_w > 0 && current_h > 0 && (current_w != width || current_h != height) {
-            width = current_w;
-            height = current_h;
-            texture = texture_creator
-                .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            scene = rebuild_scene_buffers(width as usize, height as usize, cfg);
-            stats_resize_rebuilds += 1;
+        if current_w > 0
+            && current_h > 0
+            && (current_w != render.width || current_h != render.height)
+        {
+            render = build_render_state(&texture_creator, current_w, current_h, cfg)?;
+            stats.record_resize_rebuild();
         }
 
         let draw_start = Instant::now();
         render_frame(
-            &mut texture,
-            width as usize,
-            height as usize,
+            &mut render.texture,
+            render.width as usize,
+            render.height as usize,
             &palette256,
-            &scene,
+            &render.scene,
             cfg,
         )?;
-        if let Some(path) = screenshot_path.take() {
+        if let Some(path) = run.screenshot_path.take() {
             write_scene_ppm(
                 &path,
-                width as usize,
-                height as usize,
+                render.width as usize,
+                render.height as usize,
                 &palette256,
-                &scene,
+                &render.scene,
                 cfg,
             )?;
             println!("[noise_texture_test:screenshot] wrote {}", path);
         }
-        stats_draw_ms_total += draw_start.elapsed().as_secs_f64() * 1000.0;
-        canvas.copy(&texture, None, None)?;
+        stats.record_draw_ms(draw_start.elapsed().as_secs_f64() * 1000.0);
+        canvas.copy(&render.texture, None, None)?;
 
         let present_start = Instant::now();
         let _ = canvas.present();
         if !window_shown {
             canvas.window_mut().show();
+            canvas.window_mut().raise();
             window_shown = true;
         }
-        stats_present_ms_total += present_start.elapsed().as_secs_f64() * 1000.0;
-
-        stats_frames += 1;
-        let elapsed = stats_start.elapsed();
-        if elapsed.as_secs_f64() >= 1.0 {
-            let secs = elapsed.as_secs_f64();
-            let fps = stats_frames as f64 / secs;
-            let frame_ms = (secs * 1000.0) / stats_frames as f64;
-            let draw_ms = stats_draw_ms_total / stats_frames as f64;
-            let present_ms = stats_present_ms_total / stats_frames as f64;
-            println!(
-                "stats: mode={} shift={} panel={} black={} fps={:.1} frame_ms={:.3} draw_ms={:.3} present_ms={:.3} resize_rebuilds={}",
-                cfg.mode.label(),
-                cfg.shift,
-                cfg.panel_mode,
-                cfg.black_screen_mode,
-                fps,
-                frame_ms,
-                draw_ms,
-                present_ms,
-                stats_resize_rebuilds
-            );
-            stats_start = Instant::now();
-            stats_frames = 0;
-            stats_draw_ms_total = 0.0;
-            stats_present_ms_total = 0.0;
-            stats_resize_rebuilds = 0;
-        }
+        stats.record_present_ms(present_start.elapsed().as_secs_f64() * 1000.0);
+        stats.maybe_print_and_reset(cfg);
     }
 
     sdl.mouse().show_cursor(true);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RunConfig, parse_args_from};
+
+    #[test]
+    fn parse_args_defaults() {
+        let cfg = parse_args_from(Vec::new()).expect("default parse should succeed");
+        assert_eq!(cfg, RunConfig::default());
+    }
+
+    #[test]
+    fn parse_args_screenshot() {
+        let cfg = parse_args_from(vec!["--screenshot".to_string(), "/tmp/noise.ppm".to_string()])
+            .expect("parse should succeed");
+        assert_eq!(
+            cfg,
+            RunConfig {
+                screenshot_path: Some("/tmp/noise.ppm".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_missing_screenshot_path() {
+        let err = parse_args_from(vec!["--screenshot".to_string()]).expect_err("missing path should fail");
+        assert!(err.to_string().contains("requires a file path"));
+    }
 }
