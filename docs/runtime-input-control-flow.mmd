@@ -1,0 +1,37 @@
+flowchart TD
+    A["Process Start"] --> B["parse_args()"]
+    B --> C["Initialize SDL3 + Window + Canvas"]
+    C --> D["Create Texture + PixelBuffer + DebandingFilter"]
+    D --> E["Enter Event/Render Loop"]
+
+    E --> F{"Quit Event or Esc?"}
+    F -->|Yes| Z["Restore Cursor + Exit"]
+    F -->|No| G{"Window Size Changed?"}
+
+    G -->|Yes| H["Rebuild RenderState\n(texture + pixel buffer + filter)"]
+    G -->|No| I["Render Neon Frame into base u16 buffer"]
+    H --> I
+
+    I --> J["Apply filters + upload_to_texture()"]
+    J --> K{"--screenshot pending?"}
+    K -->|Yes| L["write_ppm(path)"]
+    K -->|No| M["copy texture to canvas"]
+    L --> M
+
+    M --> N{"Window first shown?"}
+    N -->|Yes| O["show window\nstart GlobalInputCapture"]
+    N -->|No| P["keep shown state"]
+    O --> P
+
+    P --> Q["sync cursor visibility\n(hide only when shown+focused+mouse-inside)"]
+    Q --> R{"Global capture active?"}
+    R -->|Yes| S["HUD input source = global keys + modifiers"]
+    R -->|No| T["HUD input source = local SDL keys + modifiers"]
+    S --> U["Draw top-left HUD\nKEYS row + MODS row"]
+    T --> U
+
+    U --> V["present()"]
+    V --> W{"--debug enabled?"}
+    W -->|Yes| X["Emit FPS once per second"]
+    W -->|No| E
+    X --> E

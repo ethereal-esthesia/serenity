@@ -1,0 +1,23 @@
+flowchart TD
+    A["App Start"] --> B["Initialize SDL + hidden window"]
+    B --> C["Enter main loop"]
+
+    C --> D{"First window show?"}
+    D -->|Yes| E["show window (no raise)\nstart GlobalInputCapture once"]
+    D -->|No| F["continue loop"]
+    E --> F
+
+    F --> G["Process local SDL events\n(keys/focus/hover)"]
+    G --> H["Sync cursor visibility\n(hide only when shown+focused+mouse-inside)"]
+
+    H --> I["Read global capture snapshot"]
+    I --> J{"snapshot.active?"}
+    J -->|Yes| K["HUD input source = global\n(KEYS + MODS from event tap)"]
+    J -->|No| L["HUD input source = local SDL\n(silent fallback)"]
+
+    K --> M["Render frame + HUD + present"]
+    L --> M
+    M --> C
+
+    N["OS permission decision\noutside app"] --> I
+    N2["No app banner or in-app prompt\n(only OS-managed prompt if triggered)"] --> N

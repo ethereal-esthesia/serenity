@@ -86,9 +86,8 @@ cargo run --bin noise_texture_test -- --screenshot /tmp/serenity_noise.ppm
 
 ## Control Flow
 
-![Serenity default runtime control-flow diagram](docs/control-flow.png)
-
-Mermaid source: [`docs/control-flow.mmd`](docs/control-flow.mmd)
+See [`docs/runtime-input-control-flow.md`](docs/runtime-input-control-flow.md) for the main runtime/input diagram and walkthrough.
+See [`docs/global-input-permission-flow.md`](docs/global-input-permission-flow.md) for the OS permission + silent fallback flow.
 
 ## Test
 

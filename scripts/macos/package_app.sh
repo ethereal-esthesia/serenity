@@ -54,6 +54,7 @@ fi
 
 BIN_SRC="${ROOT_DIR}/target/release/${EXECUTABLE_NAME}"
 if [[ "${BUILD_RELEASE}" == "1" ]]; then
+  "${ROOT_DIR}/scripts/docs/render_diagrams.sh" || true
   (cd "${ROOT_DIR}" && cargo build --release)
 fi
 

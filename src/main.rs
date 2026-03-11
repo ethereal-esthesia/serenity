@@ -222,7 +222,12 @@ fn keycode_label(keycode: Keycode) -> String {
         .replace(',', " ")
 }
 
-fn process_events(events: &mut sdl3::EventPump, keys_down: &mut Vec<String>) -> bool {
+fn process_events(
+    events: &mut sdl3::EventPump,
+    keys_down: &mut Vec<String>,
+    window_focused: &mut bool,
+    mouse_inside_window: &mut bool,
+) -> bool {
     let is_modifier = |keycode: Keycode| {
         matches!(
             keycode,
@@ -240,6 +245,13 @@ fn process_events(events: &mut sdl3::EventPump, keys_down: &mut Vec<String>) -> 
     for event in events.poll_iter() {
         match event {
             Event::Quit { .. } => return true,
+            Event::Window { win_event, .. } => match win_event {
+                sdl3::event::WindowEvent::FocusGained => *window_focused = true,
+                sdl3::event::WindowEvent::FocusLost => *window_focused = false,
+                sdl3::event::WindowEvent::MouseEnter => *mouse_inside_window = true,
+                sdl3::event::WindowEvent::MouseLeave => *mouse_inside_window = false,
+                _ => {}
+            },
             Event::KeyDown {
                 keycode: Some(keycode),
                 repeat: false,
@@ -269,6 +281,20 @@ fn process_events(events: &mut sdl3::EventPump, keys_down: &mut Vec<String>) -> 
         }
     }
     false
+}
+
+fn sync_cursor_visibility(
+    sdl: &sdl3::Sdl,
+    cursor_hidden: &mut bool,
+    window_shown: bool,
+    window_focused: bool,
+    mouse_inside_window: bool,
+) {
+    let should_hide = window_shown && window_focused && mouse_inside_window;
+    if should_hide != *cursor_hidden {
+        sdl.mouse().show_cursor(!should_hide);
+        *cursor_hidden = should_hide;
+    }
 }
 
 fn glyph_5x7(ch: char) -> [u8; 7] {
@@ -524,13 +550,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fps_counter = FpsCounter::new();
     let neon_start = Instant::now();
     let mut window_shown = false;
+    let mut window_focused = false;
+    let mut mouse_inside_window = false;
     let mut keys_down: Vec<String> = Vec::new();
-    let global_capture = GlobalInputCapture::start();
-    let mut last_capture_status: Option<String> = None;
+    let mut global_capture: Option<GlobalInputCapture> = None;
+    let mut cursor_hidden = true;
     println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
     'running: loop {
-        if process_events(&mut events, &mut keys_down) {
+        if process_events(
+            &mut events,
+            &mut keys_down,
+            &mut window_focused,
+            &mut mouse_inside_window,
+        ) {
             break 'running;
         }
 
@@ -559,25 +592,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         canvas.copy(&render.texture, None, None)?;
-        let snap = global_capture.snapshot();
-        if snap.status != last_capture_status {
-            if let Some(msg) = &snap.status {
-                println!("[input] {}", msg);
-            }
-            last_capture_status = snap.status.clone();
+        if !window_shown {
+            canvas.window_mut().show();
+            window_shown = true;
+            global_capture = Some(GlobalInputCapture::start());
         }
-        let (hud_keys, hud_mods) = if snap.active {
-            (snap.keys_down, modifier_state_to_sdl_mod(snap.mods))
+
+        sync_cursor_visibility(
+            &sdl,
+            &mut cursor_hidden,
+            window_shown,
+            window_focused,
+            mouse_inside_window,
+        );
+
+        let (hud_keys, hud_mods) = if let Some(capture) = &global_capture {
+            let snap = capture.snapshot();
+            if snap.active {
+                (snap.keys_down, modifier_state_to_sdl_mod(snap.mods))
+            } else {
+                (keys_down.clone(), sdl.keyboard().mod_state())
+            }
         } else {
             (keys_down.clone(), sdl.keyboard().mod_state())
         };
         draw_key_debug_hud(&mut canvas, &hud_keys, hud_mods)?;
         let _ = canvas.present();
-        if !window_shown {
-            canvas.window_mut().show();
-            canvas.window_mut().raise();
-            window_shown = true;
-        }
         if debug && let Some((fps, frame_ms)) = fps_counter.tick() {
             println!("[main:fps] fps={:.1} frame_ms={:.3}", fps, frame_ms);
         }

@@ -18,7 +18,6 @@ pub struct InputSnapshot {
     pub active: bool,
     pub keys_down: Vec<String>,
     pub mods: ModifierState,
-    pub status: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -26,7 +25,6 @@ struct SharedState {
     active: bool,
     keys_down: BTreeSet<String>,
     mods: ModifierState,
-    status: Option<String>,
 }
 
 pub struct GlobalInputCapture {
@@ -39,11 +37,7 @@ impl GlobalInputCapture {
         #[cfg(target_os = "macos")]
         macos::start_event_tap(shared.clone());
         #[cfg(not(target_os = "macos"))]
-        {
-            if let Ok(mut guard) = shared.lock() {
-                guard.status = Some("Global capture is only available on macOS; using local input.".to_string());
-            }
-        }
+        {}
         Self { shared }
     }
 
@@ -53,7 +47,6 @@ impl GlobalInputCapture {
                 active: guard.active,
                 keys_down: guard.keys_down.iter().cloned().collect(),
                 mods: guard.mods,
-                status: guard.status.clone(),
             };
         }
         InputSnapshot::default()
@@ -145,28 +138,18 @@ mod macos {
             );
             if tap.is_null() {
                 let _ = Box::from_raw(user_info as *mut Arc<Mutex<SharedState>>);
-                set_status(
-                    &shared,
-                    Some(
-                        "Global capture unavailable (grant Accessibility/Input Monitoring for this app or terminal)."
-                            .to_string(),
-                    ),
-                );
+                set_active(&shared, false);
                 return;
             }
 
             let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
             if source.is_null() {
-                set_status(
-                    &shared,
-                    Some("Global capture failed creating run loop source.".to_string()),
-                );
+                set_active(&shared, false);
                 return;
             }
 
             if let Ok(mut guard) = shared.lock() {
                 guard.active = true;
-                guard.status = Some("Global capture active via CGEventTap.".to_string());
             }
             let run_loop = CFRunLoopGetCurrent();
             CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
@@ -176,10 +159,9 @@ mod macos {
         });
     }
 
-    fn set_status(shared: &Arc<Mutex<SharedState>>, status: Option<String>) {
+    fn set_active(shared: &Arc<Mutex<SharedState>>, active: bool) {
         if let Ok(mut guard) = shared.lock() {
-            guard.active = false;
-            guard.status = status;
+            guard.active = active;
         }
     }
 
