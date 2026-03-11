@@ -1,3 +1,5 @@
 target/
 .DS_Store
 docs-local/
+cfg/
+nvram/
