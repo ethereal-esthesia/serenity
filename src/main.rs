@@ -9,13 +9,55 @@ use serenity::pixel_buffer::{
 use std::f32::consts::TAU;
 use std::time::Instant;
 
-fn parse_args() -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
-    let mut debug = false;
-    let mut screenshot_path: Option<String> = None;
+struct RunConfig {
+    debug: bool,
+    screenshot_path: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DebandConfig {
+    seed: u64,
+    shift: i8,
+    dist: DebandingDistribution,
+}
+
+struct FpsCounter {
+    start: Instant,
+    frames: u64,
+}
+
+impl FpsCounter {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            frames: 0,
+        }
+    }
+
+    fn tick(&mut self) -> Option<(f64, f64)> {
+        self.frames += 1;
+        let elapsed = self.start.elapsed();
+        if elapsed.as_secs_f64() < 1.0 {
+            return None;
+        }
+        let secs = elapsed.as_secs_f64();
+        let fps = self.frames as f64 / secs;
+        let frame_ms = (secs * 1000.0) / self.frames as f64;
+        self.start = Instant::now();
+        self.frames = 0;
+        Some((fps, frame_ms))
+    }
+}
+
+fn parse_args() -> Result<RunConfig, Box<dyn std::error::Error>> {
+    let mut config = RunConfig {
+        debug: false,
+        screenshot_path: None,
+    };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--debug" => debug = true,
+            "--debug" => config.debug = true,
             "--screenshot" => {
                 let path = args.next().ok_or_else(|| {
                     std::io::Error::new(
@@ -23,12 +65,12 @@ fn parse_args() -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
                         "--screenshot requires a file path",
                     )
                 })?;
-                screenshot_path = Some(path);
+                config.screenshot_path = Some(path);
             }
             _ => {}
         }
     }
-    Ok((debug, screenshot_path))
+    Ok(config)
 }
 
 #[inline]
@@ -37,7 +79,34 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn render_topdown_ocean_frame(width: usize, height: usize, t: f32, base: &mut [u16]) {
+fn build_render_targets<'a>(
+    texture_creator: &'a sdl3::render::TextureCreator<sdl3::video::WindowContext>,
+    width: u32,
+    height: u32,
+    debug: bool,
+    palette: Palette256,
+    deband: DebandConfig,
+) -> Result<(sdl3::render::Texture<'a>, PixelBuffer), Box<dyn std::error::Error>> {
+    let texture = texture_creator
+        .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut pixels = PixelBuffer::new_with_debug(width as usize, height as usize, palette_256(palette), debug);
+    pixels.set_base(make_gradient_buffer16(width as usize, height as usize));
+    pixels.add_filter(Box::new(DebandingFilter::new(
+        deband.seed,
+        deband.shift,
+        deband.dist,
+    )));
+    if debug {
+        println!(
+            "[main:filter:init] debanding_filter dist={:?} shift={} seed=0x{:016X}",
+            deband.dist, deband.shift, deband.seed
+        );
+    }
+    Ok((texture, pixels))
+}
+
+fn render_neon_pattern_frame(width: usize, height: usize, t: f32, base: &mut [u16]) {
     let w = width as f32;
     let h = height as f32;
     for y in 0..height {
@@ -67,15 +136,18 @@ fn render_topdown_ocean_frame(width: usize, height: usize, t: f32, base: &mut [u
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (debug, mut screenshot_path) = parse_args()?;
-    let deband_seed: u64 = 0x5EED_F00D;
-    let deband_shift: i8 = -2;
-    let deband_dist = DebandingDistribution::Gaussian;
+    let run = parse_args()?;
+    let debug = run.debug;
+    let mut screenshot_path = run.screenshot_path;
+    let deband = DebandConfig {
+        seed: 0x5EED_F00D,
+        shift: -2,
+        dist: DebandingDistribution::Gaussian,
+    };
+    let palette = Palette256::SoftSky;
     if debug {
         println!("[main] debug enabled");
     }
-
-    let palette256 = palette_256(Palette256::SoftSky);
 
     let sdl = sdl3::init()?;
     let _ = sdl3::hint::set("SDL_RENDER_VSYNC", "1");
@@ -99,27 +171,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let texture_creator = canvas.texture_creator();
     let mut width = initial_width;
     let mut height = initial_height;
-    let mut texture = texture_creator
-        .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let mut pixels = PixelBuffer::new_with_debug(width as usize, height as usize, palette256, debug);
-    pixels.set_base(make_gradient_buffer16(width as usize, height as usize));
-    pixels.add_filter(Box::new(DebandingFilter::new(
-        deband_seed,
-        deband_shift,
-        deband_dist,
-    )));
-    if debug {
-        println!(
-            "[main:filter:init] debanding_filter dist={:?} shift={} seed=0x{:016X}",
-            deband_dist, deband_shift, deband_seed
-        );
-    }
+    let (mut texture, mut pixels) =
+        build_render_targets(&texture_creator, width, height, debug, palette, deband)?;
 
     let mut events = sdl.event_pump()?;
-    let mut fps_start = Instant::now();
-    let mut fps_frames: u64 = 0;
-    let ocean_start = Instant::now();
+    let mut fps_counter = FpsCounter::new();
+    let neon_start = Instant::now();
     let mut window_shown = false;
     println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
@@ -139,31 +196,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if current_w > 0 && current_h > 0 && (current_w != width || current_h != height) {
             width = current_w;
             height = current_h;
-            texture = texture_creator
-                .create_texture_streaming(Some(PixelFormatEnum::ARGB8888.into()), width, height)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            pixels = PixelBuffer::new_with_debug(
-                width as usize,
-                height as usize,
-                palette_256(Palette256::SoftSky),
-                debug,
-            );
-            pixels.set_base(make_gradient_buffer16(width as usize, height as usize));
-            pixels.add_filter(Box::new(DebandingFilter::new(
-                deband_seed,
-                deband_shift,
-                deband_dist,
-            )));
-            if debug {
-                println!(
-                    "[main:filter:init] debanding_filter dist={:?} shift={} seed=0x{:016X}",
-                    deband_dist, deband_shift, deband_seed
-                );
-            }
+            (texture, pixels) =
+                build_render_targets(&texture_creator, width, height, debug, palette, deband)?;
         }
 
-        let t = ocean_start.elapsed().as_secs_f32();
-        render_topdown_ocean_frame(width as usize, height as usize, t, pixels.base_mut());
+        let t = neon_start.elapsed().as_secs_f32();
+        render_neon_pattern_frame(width as usize, height as usize, t, pixels.base_mut());
         pixels.mark_dirty();
         pixels.upload_to_texture(&mut texture)?;
         if let Some(path) = screenshot_path.take() {
@@ -175,19 +213,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = canvas.present();
         if !window_shown {
             canvas.window_mut().show();
+            canvas.window_mut().raise();
             window_shown = true;
         }
-        if debug {
-            fps_frames += 1;
-            let elapsed = fps_start.elapsed();
-            if elapsed.as_secs_f64() >= 1.0 {
-                let secs = elapsed.as_secs_f64();
-                let fps = fps_frames as f64 / secs;
-                let frame_ms = (secs * 1000.0) / fps_frames as f64;
+        if debug && let Some((fps, frame_ms)) = fps_counter.tick() {
                 println!("[main:fps] fps={:.1} frame_ms={:.3}", fps, frame_ms);
-                fps_start = Instant::now();
-                fps_frames = 0;
-            }
         }
     }
 
