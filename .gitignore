@@ -2,3 +2,4 @@ target/
 .DS_Store
 docs-local/
 dist/
+docs/*.png
