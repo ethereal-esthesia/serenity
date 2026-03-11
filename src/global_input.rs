@@ -58,6 +58,7 @@ mod macos {
     use super::{ModifierState, SharedState};
     use std::ffi::c_void;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     type Boolean = u8;
     type CFIndex = isize;
@@ -65,6 +66,7 @@ mod macos {
     type CFRunLoopRef = *mut c_void;
     type CFRunLoopSourceRef = *mut c_void;
     type CFStringRef = *const c_void;
+    type CFTimeInterval = f64;
     type CFMachPortRef = *mut c_void;
     type CGEventRef = *mut c_void;
     type CGEventTapProxy = *mut c_void;
@@ -110,6 +112,7 @@ mod macos {
         fn CGEventTapEnable(tap: CFMachPortRef, enable: Boolean);
         fn CGEventGetIntegerValueField(event: CGEventRef, field: i32) -> i64;
         fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
+        fn AXIsProcessTrusted() -> Boolean;
 
         fn CFMachPortCreateRunLoopSource(
             allocator: CFAllocatorRef,
@@ -118,44 +121,69 @@ mod macos {
         ) -> CFRunLoopSourceRef;
         fn CFRunLoopGetCurrent() -> CFRunLoopRef;
         fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-        fn CFRunLoopRun();
+        fn CFRunLoopRunInMode(
+            mode: CFStringRef,
+            seconds: CFTimeInterval,
+            return_after_source_handled: Boolean,
+        ) -> i32;
         fn CFRelease(cf: *const c_void);
     }
 
     pub fn start_event_tap(shared: Arc<Mutex<SharedState>>) {
         std::thread::spawn(move || unsafe {
             let user_info = Box::into_raw(Box::new(shared.clone())) as *mut c_void;
-            let mask = (1u64 << K_CG_EVENT_KEY_DOWN)
-                | (1u64 << K_CG_EVENT_KEY_UP)
-                | (1u64 << K_CG_EVENT_FLAGS_CHANGED);
-            let tap = CGEventTapCreate(
-                K_CG_HID_EVENT_TAP,
-                K_CG_HEAD_INSERT_EVENT_TAP,
-                K_CG_EVENT_TAP_OPTION_DEFAULT,
-                mask,
-                Some(event_tap_callback),
-                user_info,
-            );
-            if tap.is_null() {
-                let _ = Box::from_raw(user_info as *mut Arc<Mutex<SharedState>>);
-                set_active(&shared, false);
-                return;
-            }
+            loop {
+                if AXIsProcessTrusted() == 0 {
+                    set_active(&shared, false);
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
 
-            let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-            if source.is_null() {
-                set_active(&shared, false);
-                return;
-            }
+                let mask = (1u64 << K_CG_EVENT_KEY_DOWN)
+                    | (1u64 << K_CG_EVENT_KEY_UP)
+                    | (1u64 << K_CG_EVENT_FLAGS_CHANGED);
+                let tap = CGEventTapCreate(
+                    K_CG_HID_EVENT_TAP,
+                    K_CG_HEAD_INSERT_EVENT_TAP,
+                    K_CG_EVENT_TAP_OPTION_DEFAULT,
+                    mask,
+                    Some(event_tap_callback),
+                    user_info,
+                );
+                if tap.is_null() {
+                    set_active(&shared, false);
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
 
-            if let Ok(mut guard) = shared.lock() {
-                guard.active = true;
+                let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+                if source.is_null() {
+                    set_active(&shared, false);
+                    CFRelease(tap as *const c_void);
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
+
+                if let Ok(mut guard) = shared.lock() {
+                    guard.active = true;
+                }
+                let run_loop = CFRunLoopGetCurrent();
+                CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+                CGEventTapEnable(tap, 1);
+
+                loop {
+                    if AXIsProcessTrusted() == 0 {
+                        set_active(&shared, false);
+                        CGEventTapEnable(tap, 0);
+                        break;
+                    }
+                    let _ = CFRunLoopRunInMode(kCFRunLoopCommonModes, 0.25, 1);
+                }
+
+                CFRelease(source as *const c_void);
+                CFRelease(tap as *const c_void);
+                std::thread::sleep(Duration::from_secs(1));
             }
-            let run_loop = CFRunLoopGetCurrent();
-            CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
-            CGEventTapEnable(tap, 1);
-            CFRelease(source as *const c_void);
-            CFRunLoopRun();
         });
     }
 
