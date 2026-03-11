@@ -16,6 +16,11 @@ APP_VERSION="${APP_VERSION:-${SERENITY_APP_VERSION:-0.1.0}}"
 APP_BUILD="${APP_BUILD:-${SERENITY_APP_BUILD:-1}}"
 EXECUTABLE_NAME="${EXECUTABLE_NAME:-${SERENITY_EXECUTABLE_NAME:-serenity}}"
 ICON_FILE="${ICON_FILE:-${SERENITY_ICON_FILE:-Serenity.icns}}"
+BUILD_RELEASE="${BUILD_RELEASE:-1}"
+COPY_BINARY="${COPY_BINARY:-1}"
+SIGN_MODE="${SIGN_MODE:-adhoc}"            # none | adhoc | developerid
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}" # required when SIGN_MODE=developerid
+RUN_VERIFY="${RUN_VERIFY:-1}"              # 1 to run codesign/spctl checks
 
 TEMPLATE_PATH="${ROOT_DIR}/packaging/macos/Info.plist.template"
 DIST_DIR="${ROOT_DIR}/dist"
@@ -47,18 +52,63 @@ if [[ -f "${ICON_SRC}" ]]; then
   cp "${ICON_SRC}" "${RESOURCES_DIR}/${ICON_FILE}"
 fi
 
-cat > "${MACOS_DIR}/${EXECUTABLE_NAME}" <<'STUB'
+BIN_SRC="${ROOT_DIR}/target/release/${EXECUTABLE_NAME}"
+if [[ "${BUILD_RELEASE}" == "1" ]]; then
+  (cd "${ROOT_DIR}" && cargo build --release)
+fi
+
+if [[ "${COPY_BINARY}" == "1" && -f "${BIN_SRC}" ]]; then
+  cp "${BIN_SRC}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
+  chmod +x "${MACOS_DIR}/${EXECUTABLE_NAME}"
+else
+  cat > "${MACOS_DIR}/${EXECUTABLE_NAME}" <<'STUB'
 #!/usr/bin/env bash
 echo "Serenity app bundle scaffold created."
-echo "Replace this stub with the built binary in Step 4."
+echo "Built binary missing; run scripts/macos/package_app.sh with BUILD_RELEASE=1."
 STUB
-chmod +x "${MACOS_DIR}/${EXECUTABLE_NAME}"
+  chmod +x "${MACOS_DIR}/${EXECUTABLE_NAME}"
+fi
+
+case "${SIGN_MODE}" in
+  none)
+    echo "Signing skipped (SIGN_MODE=none)."
+    ;;
+  adhoc)
+    codesign --force --deep --sign - "${APP_DIR}"
+    echo "Ad-hoc signed app: ${APP_DIR}"
+    ;;
+  developerid)
+    if [[ -z "${CODESIGN_IDENTITY}" ]]; then
+      echo "SIGN_MODE=developerid requires CODESIGN_IDENTITY." >&2
+      exit 1
+    fi
+    codesign --force --deep --options runtime --sign "${CODESIGN_IDENTITY}" "${APP_DIR}"
+    echo "Developer ID signed app: ${APP_DIR}"
+    ;;
+  *)
+    echo "Unsupported SIGN_MODE: ${SIGN_MODE} (expected none|adhoc|developerid)" >&2
+    exit 1
+    ;;
+esac
 
 echo "Created app scaffold: ${APP_DIR}"
 echo "Info.plist: ${CONTENTS_DIR}/Info.plist"
-echo "Executable stub: ${MACOS_DIR}/${EXECUTABLE_NAME}"
+if [[ -f "${BIN_SRC}" ]]; then
+  echo "Executable bundled: ${MACOS_DIR}/${EXECUTABLE_NAME}"
+else
+  echo "Executable stub: ${MACOS_DIR}/${EXECUTABLE_NAME}"
+fi
 if [[ -f "${RESOURCES_DIR}/${ICON_FILE}" ]]; then
   echo "Icon copied: ${RESOURCES_DIR}/${ICON_FILE}"
 else
   echo "Icon missing (expected for Step 3 until generated): ${ICON_SRC}"
+fi
+
+if [[ "${RUN_VERIFY}" == "1" ]]; then
+  echo "Verification: codesign"
+  codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
+  echo "Verification: spctl"
+  if ! spctl --assess --type execute --verbose "${APP_DIR}"; then
+    echo "spctl assessment failed (this can happen for ad-hoc signatures)." >&2
+  fi
 fi
