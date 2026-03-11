@@ -15,6 +15,7 @@ BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-${SERENITY_BUNDLE_IDENTIFIER:-com.ethere
 APP_VERSION="${APP_VERSION:-${SERENITY_APP_VERSION:-0.1.0}}"
 APP_BUILD="${APP_BUILD:-${SERENITY_APP_BUILD:-1}}"
 EXECUTABLE_NAME="${EXECUTABLE_NAME:-${SERENITY_EXECUTABLE_NAME:-serenity}}"
+ICON_FILE="${ICON_FILE:-${SERENITY_ICON_FILE:-Serenity.icns}}"
 
 TEMPLATE_PATH="${ROOT_DIR}/packaging/macos/Info.plist.template"
 DIST_DIR="${ROOT_DIR}/dist"
@@ -38,7 +39,13 @@ sed \
   -e "s|@APP_VERSION@|${APP_VERSION}|g" \
   -e "s|@APP_BUILD@|${APP_BUILD}|g" \
   -e "s|@EXECUTABLE_NAME@|${EXECUTABLE_NAME}|g" \
+  -e "s|@ICON_FILE@|${ICON_FILE}|g" \
   "${TEMPLATE_PATH}" > "${CONTENTS_DIR}/Info.plist"
+
+ICON_SRC="${ROOT_DIR}/assets/icon/${ICON_FILE}"
+if [[ -f "${ICON_SRC}" ]]; then
+  cp "${ICON_SRC}" "${RESOURCES_DIR}/${ICON_FILE}"
+fi
 
 cat > "${MACOS_DIR}/${EXECUTABLE_NAME}" <<'STUB'
 #!/usr/bin/env bash
@@ -50,3 +57,8 @@ chmod +x "${MACOS_DIR}/${EXECUTABLE_NAME}"
 echo "Created app scaffold: ${APP_DIR}"
 echo "Info.plist: ${CONTENTS_DIR}/Info.plist"
 echo "Executable stub: ${MACOS_DIR}/${EXECUTABLE_NAME}"
+if [[ -f "${RESOURCES_DIR}/${ICON_FILE}" ]]; then
+  echo "Icon copied: ${RESOURCES_DIR}/${ICON_FILE}"
+else
+  echo "Icon missing (expected for Step 3 until generated): ${ICON_SRC}"
+fi
