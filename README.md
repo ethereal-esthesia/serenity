@@ -79,6 +79,12 @@ cd /Users/shane/Project/serenity
 cargo run --bin noise_texture_test -- --screenshot /tmp/serenity_noise.ppm
 ```
 
+## Control Flow
+
+![Serenity default runtime control-flow diagram](docs/control-flow.png)
+
+Mermaid source: [`docs/control-flow.mmd`](docs/control-flow.mmd)
+
 ## Test
 
 ```bash
