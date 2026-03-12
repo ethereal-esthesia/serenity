@@ -37,6 +37,7 @@ pub struct InputSnapshot {
 #[derive(Debug)]
 struct SharedState {
     tap_active: bool,
+    hid_active: bool,
     capture_enabled: bool,
     recreate_requested: bool,
     debug_enabled: bool,
@@ -54,6 +55,7 @@ impl Default for SharedState {
     fn default() -> Self {
         Self {
             tap_active: false,
+            hid_active: false,
             capture_enabled: false,
             recreate_requested: false,
             debug_enabled: false,
@@ -104,7 +106,7 @@ impl GlobalInputCapture {
     pub fn snapshot(&self) -> InputSnapshot {
         if let Ok(guard) = self.shared.lock() {
             return InputSnapshot {
-                active: guard.tap_active && guard.capture_enabled,
+                active: (guard.tap_active || guard.hid_active) && guard.capture_enabled,
                 keys_down: guard.keys_down.iter().cloned().collect(),
                 mods: guard.mods,
                 fn_mode: guard.fn_mode,
@@ -161,6 +163,11 @@ mod macos {
     type CGEventMask = u64;
     type CGEventType = u32;
     type CGEventFlags = u64;
+    type IOHIDManagerRef = *mut c_void;
+    type IOHIDValueRef = *mut c_void;
+    type IOHIDElementRef = *mut c_void;
+    type IOOptionBits = u32;
+    type IOReturn = i32;
 
     type CGEventTapCallBack = Option<
         unsafe extern "C" fn(
@@ -169,6 +176,14 @@ mod macos {
             event: CGEventRef,
             user_info: *mut c_void,
         ) -> CGEventRef,
+    >;
+    type IOHIDValueCallback = Option<
+        unsafe extern "C" fn(
+            context: *mut c_void,
+            result: IOReturn,
+            sender: *mut c_void,
+            value: IOHIDValueRef,
+        ),
     >;
 
     const K_CG_HID_EVENT_TAP: u32 = 0;
@@ -186,6 +201,7 @@ mod macos {
     const K_CG_EVENT_FLAG_MASK_ALTERNATE: CGEventFlags = 0x0008_0000;
     const K_CG_EVENT_FLAG_MASK_COMMAND: CGEventFlags = 0x0010_0000;
     const K_CG_EVENT_FLAG_MASK_SECONDARY_FN: CGEventFlags = 0x0080_0000;
+    const K_HID_PAGE_CONSUMER: u32 = 0x0C;
 
     pub enum ControlMessage {
         AttachRequested,
@@ -224,12 +240,74 @@ mod macos {
         fn CFRelease(cf: *const c_void);
     }
 
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOHIDManagerCreate(allocator: CFAllocatorRef, options: IOOptionBits) -> IOHIDManagerRef;
+        fn IOHIDManagerOpen(manager: IOHIDManagerRef, options: IOOptionBits) -> IOReturn;
+        fn IOHIDManagerSetDeviceMatching(manager: IOHIDManagerRef, matching: *const c_void);
+        fn IOHIDManagerRegisterInputValueCallback(
+            manager: IOHIDManagerRef,
+            callback: IOHIDValueCallback,
+            context: *mut c_void,
+        );
+        fn IOHIDManagerScheduleWithRunLoop(
+            manager: IOHIDManagerRef,
+            run_loop: CFRunLoopRef,
+            run_loop_mode: CFStringRef,
+        );
+
+        fn IOHIDValueGetElement(value: IOHIDValueRef) -> IOHIDElementRef;
+        fn IOHIDValueGetIntegerValue(value: IOHIDValueRef) -> CFIndex;
+        fn IOHIDElementGetUsagePage(element: IOHIDElementRef) -> u32;
+        fn IOHIDElementGetUsage(element: IOHIDElementRef) -> u32;
+    }
+
     pub fn start_event_tap(shared: Arc<Mutex<SharedState>>, debug: bool) -> Sender<ControlMessage> {
+        start_hid_consumer_monitor(shared.clone(), debug);
         let (tx, rx) = channel::<ControlMessage>();
         std::thread::spawn(move || {
             run_tap_thread(shared, debug, rx);
         });
         tx
+    }
+
+    fn start_hid_consumer_monitor(shared: Arc<Mutex<SharedState>>, debug: bool) {
+        std::thread::spawn(move || unsafe {
+            let user_info = Box::into_raw(Box::new(shared.clone())) as *mut c_void;
+            let manager = IOHIDManagerCreate(std::ptr::null(), 0);
+            if manager.is_null() {
+                if debug {
+                    println!("[global_input] IOHIDManagerCreate failed; hid consumer monitor unavailable");
+                }
+                let _ = Box::from_raw(user_info as *mut Arc<Mutex<SharedState>>);
+                return;
+            }
+            IOHIDManagerSetDeviceMatching(manager, std::ptr::null());
+            IOHIDManagerRegisterInputValueCallback(manager, Some(hid_input_value_callback), user_info);
+            let run_loop = CFRunLoopGetCurrent();
+            IOHIDManagerScheduleWithRunLoop(manager, run_loop, kCFRunLoopCommonModes);
+            let open_status = IOHIDManagerOpen(manager, 0);
+            if open_status != 0 {
+                if debug {
+                    println!(
+                        "[global_input] IOHIDManagerOpen failed (status={}); hid consumer monitor unavailable",
+                        open_status
+                    );
+                }
+                CFRelease(manager as *const c_void);
+                let _ = Box::from_raw(user_info as *mut Arc<Mutex<SharedState>>);
+                return;
+            }
+            if let Ok(mut guard) = shared.lock() {
+                guard.hid_active = true;
+            }
+            if debug {
+                println!("[global_input] hid consumer monitor active");
+            }
+            loop {
+                let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, 1);
+            }
+        });
     }
 
     fn run_tap_thread(shared: Arc<Mutex<SharedState>>, debug: bool, rx: Receiver<ControlMessage>) {
@@ -326,6 +404,47 @@ mod macos {
                 guard.keys_down.clear();
                 guard.mods = ModifierState::default();
                 guard.last_modifier_flags = None;
+            }
+        }
+    }
+
+    unsafe extern "C" fn hid_input_value_callback(
+        context: *mut c_void,
+        _result: IOReturn,
+        _sender: *mut c_void,
+        value: IOHIDValueRef,
+    ) {
+        if context.is_null() || value.is_null() {
+            return;
+        }
+        let shared = unsafe { &*(context as *const Arc<Mutex<SharedState>>) };
+        let element = unsafe { IOHIDValueGetElement(value) };
+        if element.is_null() {
+            return;
+        }
+        let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
+        if usage_page != K_HID_PAGE_CONSUMER {
+            return;
+        }
+        let usage = unsafe { IOHIDElementGetUsage(element) };
+        let int_value = unsafe { IOHIDValueGetIntegerValue(value) };
+        let down = int_value != 0;
+        if let Ok(mut guard) = shared.lock() {
+            if !guard.capture_enabled {
+                return;
+            }
+            let label = consumer_usage_label(usage);
+            if down {
+                guard.keys_down.insert(label.clone());
+            } else {
+                guard.keys_down.remove(&label);
+            }
+            if guard.debug_enabled {
+                let edge = if down { "down" } else { "up" };
+                println!(
+                    "[global_input] hid_consumer_{} usage=0x{:X} value={}",
+                    edge, usage, int_value
+                );
             }
         }
     }
@@ -555,6 +674,21 @@ mod macos {
         } else {
             format!("KC{}", keycode)
         }
+    }
+
+    fn consumer_usage_label(usage: u32) -> String {
+        let name = match usage {
+            0xE2 => "MUTE",
+            0xE9 => "VOL_UP",
+            0xEA => "VOL_DOWN",
+            0xB5 => "SCAN_NEXT",
+            0xB6 => "SCAN_PREV",
+            0xB7 => "STOP",
+            0xB8 => "EJECT",
+            0xCD => "PLAY_PAUSE",
+            _ => "CONSUMER",
+        };
+        format!("{name}|HIDU{usage}")
     }
 
     fn keycode_name(keycode: u16) -> Option<&'static str> {
