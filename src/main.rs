@@ -13,6 +13,7 @@ use serenity::pixel_buffer::{
 };
 use sdl3::render::TextureCreator;
 use std::f32::consts::TAU;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 #[cfg(feature = "hud_ttf")]
 use std::path::{Path, PathBuf};
@@ -92,6 +93,68 @@ impl ThreadEventPanel {
         let end = self.lines.len().saturating_sub(self.scroll_from_bottom);
         let start = end.saturating_sub(visible_rows);
         &self.lines[start..end]
+    }
+}
+
+fn mods_to_labels(mods: Mod, fn_mod: bool) -> String {
+    let mut labels: Vec<&str> = Vec::new();
+    if mods.contains(Mod::CAPSMOD) {
+        labels.push("CAPS");
+    }
+    if mods.contains(Mod::LSHIFTMOD) {
+        labels.push("LSHIFT");
+    }
+    if mods.contains(Mod::RSHIFTMOD) {
+        labels.push("RSHIFT");
+    }
+    if mods.contains(Mod::LCTRLMOD) {
+        labels.push("LCTRL");
+    }
+    if mods.contains(Mod::RCTRLMOD) {
+        labels.push("RCTRL");
+    }
+    if mods.contains(Mod::LALTMOD) {
+        labels.push("LALT");
+    }
+    if mods.contains(Mod::RALTMOD) {
+        labels.push("RALT");
+    }
+    if mods.contains(Mod::LGUIMOD) {
+        labels.push("LGUI");
+    }
+    if mods.contains(Mod::RGUIMOD) {
+        labels.push("RGUI");
+    }
+    if fn_mod {
+        labels.push("FN");
+    }
+    if labels.is_empty() {
+        "MODS[]".to_string()
+    } else {
+        format!("MODS[{}]", labels.join(" "))
+    }
+}
+
+fn push_main_visible_event(
+    feed: &mut VecDeque<String>,
+    last_signature: &mut String,
+    keys: &[String],
+    mods: Mod,
+    fn_mod: bool,
+) {
+    let key_sig = if keys.is_empty() {
+        "KEYS[]".to_string()
+    } else {
+        format!("KEYS[{}]", keys.join(" + "))
+    };
+    let sig = format!("{} {}", key_sig, mods_to_labels(mods, fn_mod));
+    if *last_signature == sig {
+        return;
+    }
+    *last_signature = sig.clone();
+    feed.push_back(sig);
+    while feed.len() > 32 {
+        let _ = feed.pop_front();
     }
 }
 
@@ -743,7 +806,6 @@ fn modifier_state_to_sdl_mod(mods: ModifierState) -> Mod {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let run = parse_args()?;
     let debug = run.debug;
-    let naive_mod_detect = run.naive_mod_detect;
     let mut screenshot_path = run.screenshot_path;
     let deband = DebandConfig {
         seed: 0x5EED_F00D,
@@ -754,9 +816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let palette = Palette256::SoftSky;
     if debug {
         println!("[main] debug enabled");
-        if naive_mod_detect {
-            println!("[main] naive modifier detection enabled");
-        }
+        println!("[main] naive modifier detection enabled");
     }
 
     let sdl = sdl3::init()?;
@@ -788,6 +848,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let neon_start = Instant::now();
     let mut input_state = WindowInputState::with_cursor_hidden(true);
     let mut thread_panel = ThreadEventPanel::new();
+    let mut main_visible_feed: VecDeque<String> = VecDeque::new();
+    let mut last_visible_signature = String::new();
     let mut prev_window_focused = false;
     let mut attach_request_due: Option<Instant> = None;
     let mut initial_attach_pending = true;
@@ -872,7 +934,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             input_state.window_shown = true;
             global_capture = Some(GlobalInputCapture::start_with_options(
                 debug,
-                naive_mod_detect,
+                true,
             ));
             if debug {
                 println!("[main:global_input] window shown; waiting for focus before initial attach");
@@ -904,7 +966,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (hud_keys, hud_optional_keys, hud_mods, hud_fn) = if let Some(capture) = &global_capture {
             capture.set_capture_enabled(should_enable_global_capture(&input_state));
             let snap = capture.snapshot();
-            thread_panel.set_lines(snap.thread_events);
             if snap.active {
                 if snap
                     .keys_down
@@ -932,7 +993,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }
         } else {
-            thread_panel.set_lines(Vec::new());
             (
                 input_state.keys_down.clone(),
                 Vec::new(),
@@ -940,6 +1000,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 false,
             )
         };
+        push_main_visible_event(
+            &mut main_visible_feed,
+            &mut last_visible_signature,
+            &hud_keys,
+            hud_mods,
+            hud_fn,
+        );
+        thread_panel.set_lines(main_visible_feed.iter().cloned().collect());
         draw_key_debug_hud(
             &mut canvas,
             &texture_creator,
@@ -948,7 +1016,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &hud_optional_keys,
             hud_mods,
             hud_fn,
-            naive_mod_detect,
+            true,
         )?;
         draw_thread_event_panel(
             &mut canvas,
