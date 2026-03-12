@@ -13,8 +13,14 @@ use serenity::pixel_buffer::{
 };
 use sdl3::render::TextureCreator;
 use std::f32::consts::TAU;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+#[cfg(feature = "hud_ttf")]
+use std::path::{Path, PathBuf};
+
+#[cfg(feature = "hud_ttf")]
+type HudFont = sdl3::ttf::Font<'static>;
+#[cfg(not(feature = "hud_ttf"))]
+type HudFont = ();
 
 type RunConfig = CommonRunConfig;
 
@@ -332,8 +338,10 @@ fn draw_text_5x7(
 
 fn draw_key_debug_hud(
     canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+    #[cfg_attr(not(feature = "hud_ttf"), allow(unused_variables))]
     texture_creator: &TextureCreator<sdl3::video::WindowContext>,
-    hud_font: Option<&sdl3::ttf::Font<'static>>,
+    #[cfg_attr(not(feature = "hud_ttf"), allow(unused_variables))]
+    hud_font: Option<&HudFont>,
     keys_down: &[String],
     mods: Mod,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -378,6 +386,7 @@ fn draw_key_debug_hud(
         format!("MODS {}", mods_active.join(" "))
     };
     let pad = 10i32;
+    #[cfg(feature = "hud_ttf")]
     if let Some(font) = hud_font {
         let (row1_w_px, row1_h_px) = font.size_of(&row1_text).unwrap_or((140, 20));
         let (row2_w_px, row2_h_px) = font.size_of(&row2_text).unwrap_or((140, 16));
@@ -428,10 +437,11 @@ fn draw_key_debug_hud(
     Ok(())
 }
 
+#[cfg(feature = "hud_ttf")]
 fn draw_text_ttf(
     canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
     texture_creator: &TextureCreator<sdl3::video::WindowContext>,
-    font: &sdl3::ttf::Font<'static>,
+    font: &HudFont,
     x: i32,
     y: i32,
     text: &str,
@@ -449,6 +459,7 @@ fn draw_text_ttf(
     Ok(())
 }
 
+#[cfg(feature = "hud_ttf")]
 fn find_cascadia_font_path() -> Option<PathBuf> {
     let candidates = [
         PathBuf::from("assets/fonts/CascadiaMono-Regular.ttf"),
@@ -475,7 +486,8 @@ fn find_cascadia_font_path() -> Option<PathBuf> {
     None
 }
 
-fn load_hud_font(debug: bool) -> Option<sdl3::ttf::Font<'static>> {
+#[cfg(feature = "hud_ttf")]
+fn load_hud_font(debug: bool) -> Option<HudFont> {
     let ttf = match sdl3::ttf::init() {
         Ok(t) => t,
         Err(err) => {
@@ -514,6 +526,14 @@ fn load_hud_font(debug: bool) -> Option<sdl3::ttf::Font<'static>> {
             None
         }
     }
+}
+
+#[cfg(not(feature = "hud_ttf"))]
+fn load_hud_font(debug: bool) -> Option<HudFont> {
+    if debug {
+        println!("[main:hud_font] hud_ttf feature disabled; using bitmap HUD");
+    }
+    None
 }
 
 fn modifier_state_to_sdl_mod(mods: ModifierState) -> Mod {

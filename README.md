@@ -74,6 +74,7 @@ Optional HUD font override (Cascadia Mono):
 - Place a TTF file at `assets/fonts/CascadiaMono-Regular.ttf` (or `assets/fonts/CascadiaMono.ttf`).
 - If found, HUD text uses SDL_ttf + Cascadia Mono.
 - If not found, HUD falls back to built-in 5x7 bitmap text.
+- Bundled Cascadia font licensing: SIL OFL 1.1 (see `assets/fonts/CASCADIA-LICENSE.txt`).
 
 Interactive noise test (non-default):
 

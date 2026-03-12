@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2024"
 default-run = "serenity"
 
+[features]
+default = []
+hud_ttf = ["sdl3/ttf"]
+
 [dependencies]
-sdl3 = { version = "*", features = ["ttf"] }
+sdl3 = "*"
