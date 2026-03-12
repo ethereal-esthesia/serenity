@@ -1,7 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::sync::mpsc::Sender;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ModifierState {
@@ -26,10 +28,45 @@ pub enum FnTrackingMode {
     Reliable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct InputTimestamp(u64);
+
+impl InputTimestamp {
+    pub fn now() -> Self {
+        Self(raw_now_timestamp())
+    }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputEventKind {
+    KeyDown,
+    KeyUp,
+    ModChanged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputEvent {
+    pub timestamp: Option<InputTimestamp>,
+    pub kind: InputEventKind,
+    pub alias: String,
+    pub keycode: Option<u16>,
+    pub state_keys: Vec<InputKeyState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct InputKeyState {
+    pub alias: String,
+    pub keycode: Option<u16>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct InputSnapshot {
     pub active: bool,
-    pub keys_down: Vec<String>,
+    pub keys_down: Vec<InputKeyState>,
     pub mods: ModifierState,
     pub fn_mode: FnTrackingMode,
 }
@@ -43,13 +80,16 @@ struct SharedState {
     recreate_requested: bool,
     debug_enabled: bool,
     naive_mod_detect: bool,
-    keys_down: BTreeSet<String>,
+    keys_down: BTreeMap<u16, String>,
     inferred_modifier_keycodes: BTreeSet<u16>,
     rejected_modifier_keycodes: BTreeSet<u16>,
     last_modifier_flags: Option<u64>,
     hid_consumer_states: BTreeMap<u32, bool>,
     hid_consumer_active: bool,
     injection_ts_by_usage: BTreeMap<u32, Option<u64>>,
+    pending_events: VecDeque<InputEvent>,
+    probe_pending_keycode: Option<u16>,
+    probe_alias_by_keycode: BTreeMap<u16, String>,
     mods: ModifierState,
     fn_mode: FnTrackingMode,
     fn_last_observed: Option<bool>,
@@ -65,17 +105,45 @@ impl Default for SharedState {
             recreate_requested: false,
             debug_enabled: false,
             naive_mod_detect: false,
-            keys_down: BTreeSet::new(),
+            keys_down: BTreeMap::new(),
             inferred_modifier_keycodes: BTreeSet::new(),
             rejected_modifier_keycodes: BTreeSet::new(),
             last_modifier_flags: None,
             hid_consumer_states: BTreeMap::new(),
             hid_consumer_active: false,
             injection_ts_by_usage: BTreeMap::new(),
+            pending_events: VecDeque::new(),
+            probe_pending_keycode: None,
+            probe_alias_by_keycode: BTreeMap::new(),
             mods: ModifierState::default(),
             fn_mode: FnTrackingMode::Unavailable,
             fn_last_observed: None,
         }
+    }
+}
+
+const MAX_PENDING_EVENTS: usize = 512;
+const TS_PAYLOAD_MASK: u64 = 0x7FFF_FFFF_FFFF_FFFF;
+static TS_START: OnceLock<Instant> = OnceLock::new();
+
+fn raw_now_timestamp() -> u64 {
+    let start = TS_START.get_or_init(Instant::now);
+    (start.elapsed().as_nanos() as u64) & TS_PAYLOAD_MASK
+}
+
+fn queue_event(guard: &mut SharedState, event: InputEvent) {
+    let mut event = event;
+    event.state_keys = guard
+        .keys_down
+        .iter()
+        .map(|(kc, alias)| InputKeyState {
+            alias: alias.clone(),
+            keycode: Some(*kc),
+        })
+        .collect();
+    guard.pending_events.push_back(event);
+    while guard.pending_events.len() > MAX_PENDING_EVENTS {
+        let _ = guard.pending_events.pop_front();
     }
 }
 
@@ -138,12 +206,63 @@ impl GlobalInputCapture {
             }
             return InputSnapshot {
                 active: (guard.tap_active || guard.hid_active) && guard.capture_enabled,
-                keys_down: guard.keys_down.iter().cloned().collect(),
+                keys_down: guard
+                    .keys_down
+                    .iter()
+                    .map(|(kc, alias)| InputKeyState {
+                        alias: alias.clone(),
+                        keycode: Some(*kc),
+                    })
+                    .collect(),
                 mods: guard.mods,
                 fn_mode: guard.fn_mode,
             };
         }
         InputSnapshot::default()
+    }
+
+    pub fn next_event_before(&self, deadline: InputTimestamp) -> Option<InputEvent> {
+        if let Ok(mut guard) = self.shared.lock() {
+            let ready = if let Some(front) = guard.pending_events.front() {
+                front.timestamp.is_none_or(|ts| ts <= deadline)
+            } else {
+                false
+            };
+            if ready {
+                return guard.pending_events.pop_front();
+            }
+        }
+        None
+    }
+
+    pub fn try_lock_probe_alias(&self, sdl_alias: &str) -> Option<(u16, String)> {
+        if let Ok(mut guard) = self.shared.lock()
+            && let Some(kc) = guard.probe_pending_keycode.take()
+        {
+            let alias = sdl_alias.to_string();
+            guard.probe_alias_by_keycode.insert(kc, alias.clone());
+            if let Some(current_alias) = guard.keys_down.get_mut(&kc) {
+                *current_alias = alias.clone();
+            }
+            for ev in &mut guard.pending_events {
+                if ev.keycode == Some(kc) {
+                    ev.alias = alias.clone();
+                }
+                for state_key in &mut ev.state_keys {
+                    if state_key.keycode == Some(kc) {
+                        state_key.alias = alias.clone();
+                    }
+                }
+            }
+            if guard.debug_enabled {
+                println!(
+                    "[global_input] probe_locked kc={} sdl_alias={}",
+                    kc, alias
+                );
+            }
+            return Some((kc, alias));
+        }
+        None
     }
 
     pub fn is_tap_active(&self) -> bool {
@@ -163,6 +282,7 @@ impl GlobalInputCapture {
                 guard.last_modifier_flags = None;
                 guard.hid_consumer_states.clear();
                 guard.hid_consumer_active = false;
+                guard.probe_pending_keycode = None;
                 guard.injection_ts_by_usage.clear();
             }
         }
@@ -180,9 +300,12 @@ impl GlobalInputCapture {
             if guard.debug_enabled {
                 println!("[global_input] injection_start source=focus_loss kc=null ts=null");
             }
-            for label in guard.keys_down.iter() {
+            for (kc, alias) in guard.keys_down.iter() {
                 if guard.debug_enabled {
-                    println!("[global_input] synthetic_key_up label={} ts=null", label);
+                    println!(
+                        "[global_input] synthetic_key_up alias={} kc={} ts=null",
+                        alias, kc
+                    );
                 }
             }
             guard.keys_down.clear();
@@ -190,6 +313,7 @@ impl GlobalInputCapture {
             guard.last_modifier_flags = None;
             guard.hid_consumer_states.clear();
             guard.hid_consumer_active = false;
+            guard.probe_pending_keycode = None;
             guard.injection_ts_by_usage.clear();
         }
     }
@@ -209,7 +333,10 @@ impl GlobalInputCapture {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{FnTrackingMode, ModifierState, SharedState};
+    use super::{
+        FnTrackingMode, InputEvent, InputEventKind, InputTimestamp, ModifierState, SharedState,
+        queue_event,
+    };
     use std::collections::BTreeSet;
     use std::ffi::c_void;
     use std::sync::mpsc::{Receiver, Sender, channel};
@@ -573,9 +700,12 @@ mod macos {
                 usage
             );
         }
-        for label in guard.keys_down.iter() {
+        for (kc, alias) in guard.keys_down.iter() {
             if guard.debug_enabled {
-                println!("[global_input] synthetic_key_up label={} ts=null", label);
+                println!(
+                    "[global_input] synthetic_key_up alias={} kc={} ts=null",
+                    alias, kc
+                );
             }
         }
         guard.keys_down.clear();
@@ -607,23 +737,48 @@ mod macos {
             if should_passthrough_debug_combo(event_type, keycode, guard.mods) {
                 return event;
             }
+            let mut consume = true;
             match event_type {
                 K_CG_EVENT_KEY_DOWN => {
                     if guard.debug_enabled {
                         println!("[global_input] key_down kc={}", keycode);
+                    }
+                    let is_non_mod = !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes);
+                    let is_functional = is_function_keycode(keycode);
+                    if is_non_mod && !is_functional {
+                        consume = false;
+                        if keycode_name(keycode).is_none()
+                            && guard.probe_alias_by_keycode.get(&keycode).is_none()
+                            && guard.probe_pending_keycode.is_none()
+                        {
+                            guard.probe_pending_keycode = Some(keycode);
+                            if guard.debug_enabled {
+                                println!("[global_input] probe_start kc={}", keycode);
+                            }
+                        }
                     }
                     if guard.hid_consumer_active {
                         if guard.debug_enabled {
                             println!("[global_input] key_down_ignored_hid_active kc={}", keycode);
                         }
                     } else if !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes) {
-                        let label = keycode_label(keycode);
-                        if guard.keys_down.contains(&label) {
+                        if guard.keys_down.contains_key(&keycode) {
                             if guard.debug_enabled {
                                 println!("[global_input] key_down_ignored_duplicate kc={}", keycode);
                             }
                         } else {
-                            guard.keys_down.insert(label);
+                            let alias = keycode_alias_for(&guard, keycode);
+                            guard.keys_down.insert(keycode, alias.clone());
+                            queue_event(
+                                &mut guard,
+                                InputEvent {
+                                    timestamp: Some(InputTimestamp::now()),
+                                    kind: InputEventKind::KeyDown,
+                                    alias,
+                                    keycode: Some(keycode),
+                                    state_keys: Vec::new(),
+                                },
+                            );
                         }
                     }
                 }
@@ -631,14 +786,28 @@ mod macos {
                     if guard.debug_enabled {
                         println!("[global_input] key_up kc={}", keycode);
                     }
+                    let is_non_mod = !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes);
+                    let is_functional = is_function_keycode(keycode);
+                    if is_non_mod && !is_functional {
+                        consume = false;
+                    }
                     if guard.hid_consumer_active || !guard.injection_ts_by_usage.is_empty() {
                         if guard.debug_enabled {
                             println!("[global_input] key_up_ignored_injection_active kc={}", keycode);
                         }
                     } else if !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes) {
-                        let label = keycode_label(keycode);
-                        if guard.keys_down.contains(&label) {
-                            guard.keys_down.remove(&label);
+                        if guard.keys_down.remove(&keycode).is_some() {
+                            let alias = keycode_alias_for(&guard, keycode);
+                            queue_event(
+                                &mut guard,
+                                InputEvent {
+                                    timestamp: Some(InputTimestamp::now()),
+                                    kind: InputEventKind::KeyUp,
+                                    alias,
+                                    keycode: Some(keycode),
+                                    state_keys: Vec::new(),
+                                },
+                            );
                         } else if guard.debug_enabled {
                             println!("[global_input] key_up_ignored_duplicate kc={}", keycode);
                         }
@@ -708,13 +877,24 @@ mod macos {
                     };
                     guard.fn_last_observed = Some(fn_on);
                     apply_modifier_change(keycode, flags, &mut guard.mods);
+                    let alias = keycode_alias_for(&guard, keycode);
+                    queue_event(
+                        &mut guard,
+                        InputEvent {
+                            timestamp: Some(InputTimestamp::now()),
+                            kind: InputEventKind::ModChanged,
+                            alias,
+                            keycode: Some(keycode),
+                            state_keys: Vec::new(),
+                        },
+                    );
                     if guard.debug_enabled {
                         log_all_mod_edges(prev_mods, guard.mods);
                     }
                 }
                 _ => {}
             }
-            true
+            consume
         } else {
             return event;
         };
@@ -732,6 +912,20 @@ mod macos {
 
     fn known_modifier_keycode(keycode: u16) -> bool {
         matches!(keycode, 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63)
+    }
+
+    fn is_function_keycode(keycode: u16) -> bool {
+        matches!(
+            keycode,
+            36 | // RETURN
+            48 | // TAB
+            51 | // BACKSPACE
+            53 | // ESCAPE
+            82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 91 | 92 | // keypad
+            96 | 97 | 98 | 99 | 100 | 103 | 105 | 106 | 107 | 109 | 111 | 113 | 118 | 120 | 122 | // F-keys
+            114 | 115 | 116 | 117 | 119 | 121 | // nav/edit cluster
+            123 | 124 | 125 | 126 // arrows
+        )
     }
 
     fn is_modifier_keycode(keycode: u16, inferred_modifier_keycodes: &BTreeSet<u16>) -> bool {
@@ -822,9 +1016,12 @@ mod macos {
         }
     }
 
-    fn keycode_label(keycode: u16) -> String {
+    fn keycode_alias_for(guard: &SharedState, keycode: u16) -> String {
+        if let Some(alias) = guard.probe_alias_by_keycode.get(&keycode) {
+            return alias.clone();
+        }
         if let Some(name) = keycode_name(keycode) {
-            format!("{name}|KC{keycode}")
+            name.to_string()
         } else {
             format!("KC{}", keycode)
         }
@@ -884,6 +1081,16 @@ mod macos {
             50 => Some("`"),
             51 => Some("BACKSPACE"),
             53 => Some("ESCAPE"),
+            54 => Some("RGUI"),
+            55 => Some("LGUI"),
+            56 => Some("LSHIFT"),
+            57 => Some("CAPSLOCK"),
+            58 => Some("LALT"),
+            59 => Some("LCTRL"),
+            60 => Some("RSHIFT"),
+            61 => Some("RALT"),
+            62 => Some("RCTRL"),
+            63 => Some("FN"),
             82 => Some("KP0"),
             83 => Some("KP1"),
             84 => Some("KP2"),

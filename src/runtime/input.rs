@@ -9,6 +9,7 @@ pub struct WindowInputState {
     pub cursor_hidden: bool,
     pub thread_panel_scroll_lines: i32,
     pub keys_down: Vec<String>,
+    pub keydown_events: Vec<String>,
 }
 
 impl WindowInputState {
@@ -49,6 +50,7 @@ pub fn process_events_with_keydown(
     mut on_keydown: impl FnMut(Keycode) -> bool,
 ) -> bool {
     state.thread_panel_scroll_lines = 0;
+    state.keydown_events.clear();
     for event in events.poll_iter() {
         match event {
             Event::Quit { .. } => return true,
@@ -73,8 +75,9 @@ pub fn process_events_with_keydown(
                 if !is_modifier_key(keycode) {
                     let label = keycode_label(keycode);
                     if !state.keys_down.contains(&label) {
-                        state.keys_down.push(label);
+                        state.keys_down.push(label.clone());
                     }
+                    state.keydown_events.push(label);
                 }
                 if on_keydown(keycode) {
                     return true;

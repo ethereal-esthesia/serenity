@@ -1,5 +1,7 @@
 use serenity::cli::{CommonRunConfig, parse_common_args_from};
-use serenity::global_input::{GlobalInputCapture, ModifierState};
+use serenity::global_input::{
+    GlobalInputCapture, InputEvent, InputEventKind, InputTimestamp, ModifierState,
+};
 use serenity::runtime::input::{
     WindowInputState, process_events_with_debug, should_enable_global_capture, sync_cursor_visibility,
 };
@@ -13,7 +15,6 @@ use serenity::pixel_buffer::{
 };
 use sdl3::render::TextureCreator;
 use std::f32::consts::TAU;
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 #[cfg(feature = "hud_ttf")]
 use std::path::{Path, PathBuf};
@@ -57,8 +58,11 @@ impl ThreadEventPanel {
         }
     }
 
-    fn set_lines(&mut self, lines: Vec<String>) {
-        self.lines = lines;
+    fn push_line(&mut self, line: String) {
+        self.lines.push(line);
+        while self.lines.len() > 128 {
+            let _ = self.lines.remove(0);
+        }
         let max = self.max_scroll_for_rows(6);
         if self.scroll_from_bottom > max {
             self.scroll_from_bottom = max;
@@ -96,65 +100,39 @@ impl ThreadEventPanel {
     }
 }
 
-fn mods_to_labels(mods: Mod, fn_mod: bool) -> String {
-    let mut labels: Vec<&str> = Vec::new();
-    if mods.contains(Mod::CAPSMOD) {
-        labels.push("CAPS");
-    }
-    if mods.contains(Mod::LSHIFTMOD) {
-        labels.push("LSHIFT");
-    }
-    if mods.contains(Mod::RSHIFTMOD) {
-        labels.push("RSHIFT");
-    }
-    if mods.contains(Mod::LCTRLMOD) {
-        labels.push("LCTRL");
-    }
-    if mods.contains(Mod::RCTRLMOD) {
-        labels.push("RCTRL");
-    }
-    if mods.contains(Mod::LALTMOD) {
-        labels.push("LALT");
-    }
-    if mods.contains(Mod::RALTMOD) {
-        labels.push("RALT");
-    }
-    if mods.contains(Mod::LGUIMOD) {
-        labels.push("LGUI");
-    }
-    if mods.contains(Mod::RGUIMOD) {
-        labels.push("RGUI");
-    }
-    if fn_mod {
-        labels.push("FN");
-    }
-    if labels.is_empty() {
-        "MODS[]".to_string()
+fn format_input_event_for_panel(event: &InputEvent) -> String {
+    let ts = event
+        .timestamp
+        .map(|t| t.raw().to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let kind = match event.kind {
+        InputEventKind::KeyDown => "KEY_DOWN",
+        InputEventKind::KeyUp => "KEY_UP",
+        InputEventKind::ModChanged => "MOD_CHANGED",
+    };
+    let state = if event.state_keys.is_empty() {
+        "[]".to_string()
     } else {
-        format!("MODS[{}]", labels.join(" "))
+        let joined = event
+            .state_keys
+            .iter()
+            .map(|k| format_key_for_hud(&k.alias, k.keycode))
+            .collect::<Vec<String>>()
+            .join(" + ");
+        format!("[{}]", joined)
+    };
+    if let Some(kc) = event.keycode {
+        format!("{kind} {} KC{} ts={} state={}", event.alias, kc, ts, state)
+    } else {
+        format!("{kind} {} ts={} state={}", event.alias, ts, state)
     }
 }
 
-fn push_main_visible_event(
-    feed: &mut VecDeque<String>,
-    last_signature: &mut String,
-    keys: &[String],
-    mods: Mod,
-    fn_mod: bool,
-) {
-    let key_sig = if keys.is_empty() {
-        "KEYS[]".to_string()
+fn format_key_for_hud(alias: &str, keycode: Option<u16>) -> String {
+    if let Some(kc) = keycode {
+        format!("{alias}|KC{kc}")
     } else {
-        format!("KEYS[{}]", keys.join(" + "))
-    };
-    let sig = format!("{} {}", key_sig, mods_to_labels(mods, fn_mod));
-    if *last_signature == sig {
-        return;
-    }
-    *last_signature = sig.clone();
-    feed.push_back(sig);
-    while feed.len() > 32 {
-        let _ = feed.pop_front();
+        alias.to_string()
     }
 }
 
@@ -848,8 +826,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let neon_start = Instant::now();
     let mut input_state = WindowInputState::with_cursor_hidden(true);
     let mut thread_panel = ThreadEventPanel::new();
-    let mut main_visible_feed: VecDeque<String> = VecDeque::new();
-    let mut last_visible_signature = String::new();
     let mut prev_window_focused = false;
     let mut attach_request_due: Option<Instant> = None;
     let mut initial_attach_pending = true;
@@ -859,6 +835,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     'running: loop {
         if process_events_with_debug(&mut events, &mut input_state, debug) {
             break 'running;
+        }
+        if let Some(capture) = &global_capture {
+            for sdl_alias in &input_state.keydown_events {
+                let _ = capture.try_lock_probe_alias(sdl_alias);
+            }
         }
         if !prev_window_focused && input_state.window_focused {
             if let Some(capture) = &global_capture {
@@ -965,19 +946,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thread_panel.scroll_lines(input_state.thread_panel_scroll_lines, 6);
         let (hud_keys, hud_optional_keys, hud_mods, hud_fn) = if let Some(capture) = &global_capture {
             capture.set_capture_enabled(should_enable_global_capture(&input_state));
+            let deadline = InputTimestamp::now();
+            while let Some(event) = capture.next_event_before(deadline) {
+                thread_panel.push_line(format_input_event_for_panel(&event));
+            }
             let snap = capture.snapshot();
             if snap.active {
-                if snap
-                    .keys_down
-                    .iter()
-                    .any(|k| k == "ESCAPE" || k.starts_with("ESCAPE|"))
-                {
+                if snap.keys_down.iter().any(|k| k.alias == "ESCAPE") {
                     break 'running;
                 }
-                let (optional, regular): (Vec<String>, Vec<String>) = snap
+                let regular: Vec<String> = snap
                     .keys_down
-                    .into_iter()
-                    .partition(|k| k.contains("|HIDU") || k.contains("INJ|"));
+                    .iter()
+                    .map(|k| format_key_for_hud(&k.alias, k.keycode))
+                    .collect();
+                let optional: Vec<String> = Vec::new();
                 (
                     regular,
                     optional,
@@ -1000,14 +983,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 false,
             )
         };
-        push_main_visible_event(
-            &mut main_visible_feed,
-            &mut last_visible_signature,
-            &hud_keys,
-            hud_mods,
-            hud_fn,
-        );
-        thread_panel.set_lines(main_visible_feed.iter().cloned().collect());
         draw_key_debug_hud(
             &mut canvas,
             &texture_creator,
