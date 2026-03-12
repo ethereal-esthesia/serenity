@@ -30,6 +30,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "sdl3-sys",
+ "sdl3-ttf-sys",
 ]
 
 [[package]]
@@ -37,6 +38,15 @@ name = "sdl3-sys"
 version = "0.5.12+SDL3-3.2.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78b9638d20441d9641bf479d5ec737a46e159549df3a03d1c09d6387f5adf128"
+
+[[package]]
+name = "sdl3-ttf-sys"
+version = "0.2.1+SDL3-ttf-3.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b552f1d822f0024121a77ceebcb92c74c78532a3b9d4bf8aae3c2cbc02d3cbd2"
+dependencies = [
+ "sdl3-sys",
+]
 
 [[package]]
 name = "serenity"

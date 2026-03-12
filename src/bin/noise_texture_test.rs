@@ -1,4 +1,3 @@
-use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
 use sdl3::pixels::Color;
 use sdl3::pixels::PixelFormatEnum;
@@ -8,6 +7,7 @@ use std::{io::Write, path::Path};
 use serenity::cli::{CommonRunConfig, parse_common_args_from};
 use serenity::fast_rng::FastRng;
 use serenity::palette::{Palette256, palette_256};
+use serenity::runtime::input::{WindowInputState, process_events_with_keydown, sync_cursor_visibility};
 
 const PANEL_SIZE: usize = 32;
 const NOISE_SEED: u64 = 0x5EED_F00D;
@@ -381,42 +381,13 @@ fn build_render_state<'a>(
     })
 }
 
-fn process_events(
-    events: &mut sdl3::EventPump,
-    cfg: &mut NoiseConfig,
-    render: &mut RenderState<'_>,
-) -> bool {
-    for event in events.poll_iter() {
-        match event {
-            Event::Quit { .. } => return true,
-            Event::KeyDown {
-                keycode: Some(Keycode::Escape),
-                ..
-            } => return true,
-            Event::KeyDown {
-                keycode: Some(keycode),
-                repeat: false,
-                ..
-            } => handle_keydown(
-                keycode,
-                cfg,
-                render.width as usize,
-                render.height as usize,
-                &mut render.scene,
-            ),
-            _ => {}
-        }
-    }
-    false
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut run = parse_args()?;
     let palette256 = palette_256(Palette256::SoftSky);
 
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
-    sdl.mouse().show_cursor(false);
+    sdl.mouse().show_cursor(true);
 
     let initial_width: u32 = 1024;
     let initial_height: u32 = 768;
@@ -438,7 +409,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut events = sdl.event_pump()?;
     let mut stats = PerfStats::new();
-    let mut window_shown = false;
+    let mut input_state = WindowInputState::default();
     #[cfg(debug_assertions)]
     println!("Debug build detected: run `cargo run --release --bin noise_texture_test` for real perf numbers.");
     println!(
@@ -446,7 +417,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     print_config("Current:", cfg);
     'running: loop {
-        if process_events(&mut events, &mut cfg, &mut render) {
+        if process_events_with_keydown(&mut events, &mut input_state, |keycode| {
+            handle_keydown(
+                keycode,
+                &mut cfg,
+                render.width as usize,
+                render.height as usize,
+                &mut render.scene,
+            );
+            false
+        }) {
             break 'running;
         }
 
@@ -484,11 +464,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let present_start = Instant::now();
         let _ = canvas.present();
-        if !window_shown {
+        if !input_state.window_shown {
             canvas.window_mut().show();
             canvas.window_mut().raise();
-            window_shown = true;
+            input_state.window_shown = true;
         }
+        sync_cursor_visibility(&sdl, &mut input_state);
         stats.record_present_ms(present_start.elapsed().as_secs_f64() * 1000.0);
         stats.maybe_print_and_reset(cfg);
     }

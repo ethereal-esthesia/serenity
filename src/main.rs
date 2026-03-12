@@ -1,7 +1,9 @@
 use serenity::cli::{CommonRunConfig, parse_common_args_from};
 use serenity::global_input::{GlobalInputCapture, ModifierState};
-use sdl3::event::Event;
-use sdl3::keyboard::{Keycode, Mod};
+use serenity::runtime::input::{
+    WindowInputState, process_events, should_enable_global_capture, sync_cursor_visibility,
+};
+use sdl3::keyboard::Mod;
 use sdl3::pixels::Color;
 use sdl3::pixels::PixelFormatEnum;
 use sdl3::rect::Rect;
@@ -9,8 +11,10 @@ use serenity::palette::{Palette256, palette_256};
 use serenity::pixel_buffer::{
     DebandingDistribution, DebandingFilter, PixelBuffer, make_gradient_buffer16,
 };
+use sdl3::render::TextureCreator;
 use std::f32::consts::TAU;
-use std::time::Instant;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 type RunConfig = CommonRunConfig;
 
@@ -214,89 +218,6 @@ fn render_neon_pattern_frame(
     }
 }
 
-fn keycode_label(keycode: Keycode) -> String {
-    format!("{:?}", keycode)
-        .to_uppercase()
-        .replace('_', " ")
-        .replace(':', " ")
-        .replace(',', " ")
-}
-
-fn process_events(
-    events: &mut sdl3::EventPump,
-    keys_down: &mut Vec<String>,
-    window_focused: &mut bool,
-    mouse_inside_window: &mut bool,
-) -> bool {
-    let is_modifier = |keycode: Keycode| {
-        matches!(
-            keycode,
-            Keycode::LShift
-                | Keycode::RShift
-                | Keycode::LCtrl
-                | Keycode::RCtrl
-                | Keycode::LAlt
-                | Keycode::RAlt
-                | Keycode::LGui
-                | Keycode::RGui
-        )
-    };
-
-    for event in events.poll_iter() {
-        match event {
-            Event::Quit { .. } => return true,
-            Event::Window { win_event, .. } => match win_event {
-                sdl3::event::WindowEvent::FocusGained => *window_focused = true,
-                sdl3::event::WindowEvent::FocusLost => *window_focused = false,
-                sdl3::event::WindowEvent::MouseEnter => *mouse_inside_window = true,
-                sdl3::event::WindowEvent::MouseLeave => *mouse_inside_window = false,
-                _ => {}
-            },
-            Event::KeyDown {
-                keycode: Some(keycode),
-                repeat: false,
-                ..
-            } => {
-                if keycode == Keycode::Escape {
-                    return true;
-                }
-                if !is_modifier(keycode) {
-                    let label = keycode_label(keycode);
-                    if !keys_down.contains(&label) {
-                        keys_down.push(label);
-                    }
-                }
-            }
-            Event::KeyUp {
-                keycode: Some(keycode),
-                repeat: false,
-                ..
-            } => {
-                if !is_modifier(keycode) {
-                    let label = keycode_label(keycode);
-                    keys_down.retain(|k| k != &label);
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-fn sync_cursor_visibility(
-    sdl: &sdl3::Sdl,
-    cursor_hidden: &mut bool,
-    window_shown: bool,
-    window_focused: bool,
-    mouse_inside_window: bool,
-) {
-    let should_hide = window_shown && window_focused && mouse_inside_window;
-    if should_hide != *cursor_hidden {
-        sdl.mouse().show_cursor(!should_hide);
-        *cursor_hidden = should_hide;
-    }
-}
-
 fn glyph_5x7(ch: char) -> [u8; 7] {
     match ch {
         'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
@@ -411,6 +332,8 @@ fn draw_text_5x7(
 
 fn draw_key_debug_hud(
     canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+    texture_creator: &TextureCreator<sdl3::video::WindowContext>,
+    hud_font: Option<&sdl3::ttf::Font<'static>>,
     keys_down: &[String],
     mods: Mod,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -454,9 +377,35 @@ fn draw_key_debug_hud(
     } else {
         format!("MODS {}", mods_active.join(" "))
     };
-    let row2_w = (row2_text.chars().count() as i32 * 6 - 1) * row2_scale;
-
     let pad = 10i32;
+    if let Some(font) = hud_font {
+        let (row1_w_px, row1_h_px) = font.size_of(&row1_text).unwrap_or((140, 20));
+        let (row2_w_px, row2_h_px) = font.size_of(&row2_text).unwrap_or((140, 16));
+        let box_w = ((row1_w_px as i32).max(row2_w_px as i32) + pad * 2).max(140) as u32;
+        let box_h = (row1_h_px as i32 + row2_h_px as i32 + pad * 3) as u32;
+        draw_rounded_box(canvas, 12, 12, box_w, box_h, 10, Color::RGB(16, 24, 36))?;
+        draw_text_ttf(
+            canvas,
+            texture_creator,
+            font,
+            12 + pad,
+            12 + pad,
+            &row1_text,
+            Color::RGB(210, 232, 255),
+        )?;
+        draw_text_ttf(
+            canvas,
+            texture_creator,
+            font,
+            12 + pad,
+            12 + pad * 2 + row1_h_px as i32,
+            &row2_text,
+            Color::RGB(186, 200, 220),
+        )?;
+        return Ok(());
+    }
+
+    let row2_w = (row2_text.chars().count() as i32 * 6 - 1) * row2_scale;
     let box_w = (row1_w.max(row2_w) + pad * 2).max(140) as u32;
     let box_h = (row1_h + row2_h + pad * 3) as u32;
     draw_rounded_box(canvas, 12, 12, box_w, box_h, 10, Color::RGB(16, 24, 36))?;
@@ -477,6 +426,94 @@ fn draw_key_debug_hud(
         Color::RGB(186, 200, 220),
     )?;
     Ok(())
+}
+
+fn draw_text_ttf(
+    canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+    texture_creator: &TextureCreator<sdl3::video::WindowContext>,
+    font: &sdl3::ttf::Font<'static>,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: Color,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let surface = font
+        .render(text)
+        .blended(color)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let texture = texture_creator
+        .create_texture_from_surface(&surface)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let q = texture.query();
+    canvas.copy(&texture, None, Rect::new(x, y, q.width, q.height))?;
+    Ok(())
+}
+
+fn find_cascadia_font_path() -> Option<PathBuf> {
+    let candidates = [
+        PathBuf::from("assets/fonts/CascadiaMono-Regular.ttf"),
+        PathBuf::from("assets/fonts/CascadiaMono.ttf"),
+        PathBuf::from("assets/fonts/CascadiaCode-Regular.ttf"),
+    ];
+    for path in candidates {
+        if Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let user_candidates = [
+            PathBuf::from(format!("{home}/Library/Fonts/CascadiaMono-Regular.ttf")),
+            PathBuf::from(format!("{home}/Library/Fonts/CascadiaMono.ttf")),
+            PathBuf::from(format!("{home}/Library/Fonts/CascadiaCode-Regular.ttf")),
+        ];
+        for path in user_candidates {
+            if Path::new(&path).exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn load_hud_font(debug: bool) -> Option<sdl3::ttf::Font<'static>> {
+    let ttf = match sdl3::ttf::init() {
+        Ok(t) => t,
+        Err(err) => {
+            if debug {
+                println!("[main:hud_font] SDL_ttf init failed; using bitmap HUD: {}", err);
+            }
+            return None;
+        }
+    };
+    let path = match find_cascadia_font_path() {
+        Some(p) => p,
+        None => {
+            if debug {
+                println!(
+                    "[main:hud_font] Cascadia Mono not found; expected assets/fonts/CascadiaMono-Regular.ttf (or similar). Using bitmap HUD"
+                );
+            }
+            return None;
+        }
+    };
+    match ttf.load_font(&path, 18.0) {
+        Ok(font) => {
+            if debug {
+                println!("[main:hud_font] using Cascadia font at {}", path.display());
+            }
+            Some(font)
+        }
+        Err(err) => {
+            if debug {
+                println!(
+                    "[main:hud_font] failed to load {} ({}); using bitmap HUD",
+                    path.display(),
+                    err
+                );
+            }
+            None
+        }
+    }
 }
 
 fn modifier_state_to_sdl_mod(mods: ModifierState) -> Mod {
@@ -545,27 +582,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let texture_creator = canvas.texture_creator();
     let mut render =
         build_render_state(&texture_creator, initial_width, initial_height, debug, palette, deband)?;
+    let hud_font = load_hud_font(debug);
 
     let mut events = sdl.event_pump()?;
     let mut fps_counter = FpsCounter::new();
     let neon_start = Instant::now();
-    let mut window_shown = false;
-    let mut window_focused = false;
-    let mut mouse_inside_window = false;
-    let mut keys_down: Vec<String> = Vec::new();
+    let mut input_state = WindowInputState::with_cursor_hidden(true);
+    let mut prev_window_focused = false;
+    let mut attach_request_due: Option<Instant> = None;
     let mut global_capture: Option<GlobalInputCapture> = None;
-    let mut cursor_hidden = true;
     println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
     'running: loop {
-        if process_events(
-            &mut events,
-            &mut keys_down,
-            &mut window_focused,
-            &mut mouse_inside_window,
-        ) {
+        if process_events(&mut events, &mut input_state) {
             break 'running;
         }
+        if !prev_window_focused && input_state.window_focused {
+            let tap_active = global_capture
+                .as_ref()
+                .map(|c| c.is_tap_active())
+                .unwrap_or(false);
+            if !tap_active {
+                attach_request_due = Some(Instant::now() + Duration::from_secs(10));
+                if debug {
+                    println!("[main:global_input] focus gained; scheduling attach in 10s");
+                }
+            } else if debug {
+                println!("[main:global_input] focus gained; tap already active, no schedule");
+            }
+        } else if prev_window_focused && !input_state.window_focused && debug {
+            println!("[main:global_input] focus lost; attach schedule unchanged");
+        }
+        prev_window_focused = input_state.window_focused;
 
         let (current_w, current_h) = canvas.output_size()?;
         if current_w > 0
@@ -592,34 +640,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         canvas.copy(&render.texture, None, None)?;
-        if !window_shown {
+        if !input_state.window_shown {
             canvas.window_mut().show();
-            window_shown = true;
-            global_capture = Some(GlobalInputCapture::start());
+            input_state.window_shown = true;
+            global_capture = Some(GlobalInputCapture::start_with_debug(debug));
+            if let Some(capture) = &global_capture {
+                if debug {
+                    println!("[main:global_input] window shown; requesting initial attach now");
+                }
+                capture.request_attach();
+            }
+        }
+        if let (Some(capture), Some(due)) = (&global_capture, attach_request_due)
+            && input_state.window_focused
+            && Instant::now() >= due
+        {
+            if debug {
+                println!("[main:global_input] requesting global attach now");
+            }
+            capture.request_attach();
+            attach_request_due = None;
+        }
+        if let Some(capture) = &global_capture
+            && capture.is_tap_active()
+            && attach_request_due.is_some()
+        {
+            attach_request_due = None;
+            if debug {
+                println!("[main:global_input] tap active; cleared pending attach schedule");
+            }
         }
 
-        sync_cursor_visibility(
-            &sdl,
-            &mut cursor_hidden,
-            window_shown,
-            window_focused,
-            mouse_inside_window,
-        );
+        sync_cursor_visibility(&sdl, &mut input_state);
 
         let (hud_keys, hud_mods) = if let Some(capture) = &global_capture {
+            capture.set_capture_enabled(should_enable_global_capture(&input_state));
             let snap = capture.snapshot();
             if snap.active {
-                if snap.keys_down.iter().any(|k| k == "ESCAPE") {
+                if snap
+                    .keys_down
+                    .iter()
+                    .any(|k| k == "ESCAPE" || k.starts_with("ESCAPE|"))
+                {
                     break 'running;
                 }
                 (snap.keys_down, modifier_state_to_sdl_mod(snap.mods))
             } else {
-                (keys_down.clone(), sdl.keyboard().mod_state())
+                (input_state.keys_down.clone(), sdl.keyboard().mod_state())
             }
         } else {
-            (keys_down.clone(), sdl.keyboard().mod_state())
+            (input_state.keys_down.clone(), sdl.keyboard().mod_state())
         };
-        draw_key_debug_hud(&mut canvas, &hud_keys, hud_mods)?;
+        draw_key_debug_hud(&mut canvas, &texture_creator, hud_font.as_ref(), &hud_keys, hud_mods)?;
         let _ = canvas.present();
         if debug && let Some((fps, frame_ms)) = fps_counter.tick() {
             println!("[main:fps] fps={:.1} frame_ms={:.3}", fps, frame_ms);

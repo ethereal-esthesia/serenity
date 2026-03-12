@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "macos")]
+use std::sync::mpsc::Sender;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ModifierState {
@@ -22,34 +24,71 @@ pub struct InputSnapshot {
 
 #[derive(Debug, Default)]
 struct SharedState {
-    active: bool,
+    tap_active: bool,
+    capture_enabled: bool,
+    recreate_requested: bool,
     keys_down: BTreeSet<String>,
     mods: ModifierState,
 }
 
 pub struct GlobalInputCapture {
     shared: Arc<Mutex<SharedState>>,
+    #[cfg(target_os = "macos")]
+    control_tx: Sender<macos::ControlMessage>,
 }
 
 impl GlobalInputCapture {
     pub fn start() -> Self {
+        Self::start_with_debug(false)
+    }
+
+    pub fn start_with_debug(debug: bool) -> Self {
         let shared = Arc::new(Mutex::new(SharedState::default()));
         #[cfg(target_os = "macos")]
-        macos::start_event_tap(shared.clone());
+        let control_tx = macos::start_event_tap(shared.clone(), debug);
         #[cfg(not(target_os = "macos"))]
         {}
-        Self { shared }
+        Self {
+            shared,
+            #[cfg(target_os = "macos")]
+            control_tx,
+        }
     }
 
     pub fn snapshot(&self) -> InputSnapshot {
         if let Ok(guard) = self.shared.lock() {
             return InputSnapshot {
-                active: guard.active,
+                active: guard.tap_active && guard.capture_enabled,
                 keys_down: guard.keys_down.iter().cloned().collect(),
                 mods: guard.mods,
             };
         }
         InputSnapshot::default()
+    }
+
+    pub fn is_tap_active(&self) -> bool {
+        if let Ok(guard) = self.shared.lock() {
+            guard.tap_active
+        } else {
+            false
+        }
+    }
+
+    pub fn set_capture_enabled(&self, enabled: bool) {
+        if let Ok(mut guard) = self.shared.lock() {
+            guard.capture_enabled = enabled;
+            if !enabled {
+                guard.keys_down.clear();
+                guard.mods = ModifierState::default();
+            }
+        }
+    }
+
+    pub fn request_attach(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = self.control_tx.send(macos::ControlMessage::AttachRequested);
+        }
     }
 }
 
@@ -57,8 +96,8 @@ impl GlobalInputCapture {
 mod macos {
     use super::{ModifierState, SharedState};
     use std::ffi::c_void;
+    use std::sync::mpsc::{Receiver, Sender, channel};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     type Boolean = u8;
     type CFIndex = isize;
@@ -97,9 +136,14 @@ mod macos {
     const K_CG_EVENT_FLAG_MASK_ALTERNATE: CGEventFlags = 0x0008_0000;
     const K_CG_EVENT_FLAG_MASK_COMMAND: CGEventFlags = 0x0010_0000;
 
+    pub enum ControlMessage {
+        AttachRequested,
+    }
+
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         static kCFRunLoopCommonModes: CFStringRef;
+        static kCFRunLoopDefaultMode: CFStringRef;
 
         fn CGEventTapCreate(
             tap: u32,
@@ -110,9 +154,9 @@ mod macos {
             user_info: *mut c_void,
         ) -> CFMachPortRef;
         fn CGEventTapEnable(tap: CFMachPortRef, enable: Boolean);
+        fn CGEventTapIsEnabled(tap: CFMachPortRef) -> Boolean;
         fn CGEventGetIntegerValueField(event: CGEventRef, field: i32) -> i64;
         fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
-        fn AXIsProcessTrusted() -> Boolean;
 
         fn CFMachPortCreateRunLoopSource(
             allocator: CFAllocatorRef,
@@ -129,14 +173,27 @@ mod macos {
         fn CFRelease(cf: *const c_void);
     }
 
-    pub fn start_event_tap(shared: Arc<Mutex<SharedState>>) {
-        std::thread::spawn(move || unsafe {
+    pub fn start_event_tap(shared: Arc<Mutex<SharedState>>, debug: bool) -> Sender<ControlMessage> {
+        let (tx, rx) = channel::<ControlMessage>();
+        std::thread::spawn(move || {
+            run_tap_thread(shared, debug, rx);
+        });
+        tx
+    }
+
+    fn run_tap_thread(shared: Arc<Mutex<SharedState>>, debug: bool, rx: Receiver<ControlMessage>) {
+        unsafe {
             let user_info = Box::into_raw(Box::new(shared.clone())) as *mut c_void;
             loop {
-                if AXIsProcessTrusted() == 0 {
-                    set_active(&shared, false);
-                    std::thread::sleep(Duration::from_secs(5));
+                match rx.recv() {
+                    Ok(ControlMessage::AttachRequested) => {}
+                    Err(_) => break,
+                }
+                if let Ok(guard) = shared.lock() && guard.tap_active {
                     continue;
+                }
+                if debug {
+                    println!("[global_input] attempting tap attach");
                 }
 
                 let mask = (1u64 << K_CG_EVENT_KEY_DOWN)
@@ -151,66 +208,98 @@ mod macos {
                     user_info,
                 );
                 if tap.is_null() {
+                    if debug {
+                        println!("[global_input] CGEventTapCreate failed; fallback active");
+                    }
                     set_active(&shared, false);
-                    std::thread::sleep(Duration::from_secs(5));
                     continue;
                 }
 
                 let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
                 if source.is_null() {
+                    if debug {
+                        println!("[global_input] CFMachPortCreateRunLoopSource failed; fallback active");
+                    }
                     set_active(&shared, false);
                     CFRelease(tap as *const c_void);
-                    std::thread::sleep(Duration::from_secs(5));
                     continue;
                 }
 
                 if let Ok(mut guard) = shared.lock() {
-                    guard.active = true;
+                    guard.tap_active = true;
+                    guard.recreate_requested = false;
                 }
                 let run_loop = CFRunLoopGetCurrent();
                 CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
                 CGEventTapEnable(tap, 1);
+                if debug {
+                    println!("[global_input] event tap active");
+                }
 
                 loop {
-                    if AXIsProcessTrusted() == 0 {
+                    let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, 1);
+                    let recreate_requested = if let Ok(guard) = shared.lock() {
+                        guard.recreate_requested
+                    } else {
+                        true
+                    };
+                    if recreate_requested || CGEventTapIsEnabled(tap) == 0 {
+                        if debug {
+                            println!("[global_input] tap disabled/error detected; switching to fallback and recreating");
+                        }
                         set_active(&shared, false);
                         CGEventTapEnable(tap, 0);
+                        if let Ok(mut guard) = shared.lock() {
+                            guard.recreate_requested = true;
+                        }
                         break;
                     }
-                    let _ = CFRunLoopRunInMode(kCFRunLoopCommonModes, 0.25, 1);
                 }
 
                 CFRelease(source as *const c_void);
                 CFRelease(tap as *const c_void);
-                std::thread::sleep(Duration::from_secs(1));
+                if debug {
+                    println!("[global_input] event tap released");
+                }
             }
-        });
+            let _ = Box::from_raw(user_info as *mut Arc<Mutex<SharedState>>);
+        }
     }
 
     fn set_active(shared: &Arc<Mutex<SharedState>>, active: bool) {
         if let Ok(mut guard) = shared.lock() {
-            guard.active = active;
+            guard.tap_active = active;
+            if !active {
+                guard.keys_down.clear();
+                guard.mods = ModifierState::default();
+            }
         }
     }
 
     unsafe extern "C" fn event_tap_callback(
-        proxy: CGEventTapProxy,
+        _proxy: CGEventTapProxy,
         event_type: CGEventType,
         event: CGEventRef,
         user_info: *mut c_void,
     ) -> CGEventRef {
+        let shared = unsafe { &*(user_info as *const Arc<Mutex<SharedState>>) };
         if event_type == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT
             || event_type == K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT
         {
-            unsafe {
-                CGEventTapEnable(proxy, 1);
+            if let Ok(mut guard) = shared.lock() {
+                guard.recreate_requested = true;
             }
             return event;
         }
-        let shared = unsafe { &*(user_info as *const Arc<Mutex<SharedState>>) };
         let keycode = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) as u16 };
 
-        if let Ok(mut guard) = shared.lock() {
+        let consume_keyboard_event = if let Ok(mut guard) = shared.lock() {
+            if !guard.capture_enabled {
+                return event;
+            }
+            if should_passthrough_debug_combo(event_type, keycode, guard.mods) {
+                return event;
+            }
             match event_type {
                 K_CG_EVENT_KEY_DOWN => {
                     if !is_modifier_keycode(keycode) {
@@ -228,15 +317,39 @@ mod macos {
                 }
                 _ => {}
             }
-        }
-        match event_type {
-            K_CG_EVENT_KEY_DOWN | K_CG_EVENT_KEY_UP | K_CG_EVENT_FLAGS_CHANGED => std::ptr::null_mut(),
-            _ => event,
+            true
+        } else {
+            return event;
+        };
+        if consume_keyboard_event
+            && matches!(
+                event_type,
+                K_CG_EVENT_KEY_DOWN | K_CG_EVENT_KEY_UP | K_CG_EVENT_FLAGS_CHANGED
+            )
+        {
+            std::ptr::null_mut()
+        } else {
+            event
         }
     }
 
     fn is_modifier_keycode(keycode: u16) -> bool {
         matches!(keycode, 54 | 55 | 56 | 58 | 59 | 60 | 61 | 62)
+    }
+
+    fn should_passthrough_debug_combo(
+        event_type: CGEventType,
+        keycode: u16,
+        mods: ModifierState,
+    ) -> bool {
+        if !cfg!(debug_assertions) {
+            return false;
+        }
+        let is_key_event = matches!(event_type, K_CG_EVENT_KEY_DOWN | K_CG_EVENT_KEY_UP);
+        let is_escape = keycode == 53;
+        let alt_down = mods.lalt || mods.ralt;
+        let meta_down = mods.lgui || mods.rgui;
+        is_key_event && is_escape && alt_down && meta_down
     }
 
     fn apply_modifier_change(keycode: u16, flags: CGEventFlags, mods: &mut ModifierState) {
@@ -258,74 +371,104 @@ mod macos {
     }
 
     fn keycode_label(keycode: u16) -> String {
+        if let Some(name) = keycode_name(keycode) {
+            format!("{name}|KC{keycode}")
+        } else {
+            format!("KC{}", keycode)
+        }
+    }
+
+    fn keycode_name(keycode: u16) -> Option<&'static str> {
         match keycode {
-            0 => "A".to_string(),
-            1 => "S".to_string(),
-            2 => "D".to_string(),
-            3 => "F".to_string(),
-            4 => "H".to_string(),
-            5 => "G".to_string(),
-            6 => "Z".to_string(),
-            7 => "X".to_string(),
-            8 => "C".to_string(),
-            9 => "V".to_string(),
-            11 => "B".to_string(),
-            12 => "Q".to_string(),
-            13 => "W".to_string(),
-            14 => "E".to_string(),
-            15 => "R".to_string(),
-            16 => "Y".to_string(),
-            17 => "T".to_string(),
-            18 => "1".to_string(),
-            19 => "2".to_string(),
-            20 => "3".to_string(),
-            21 => "4".to_string(),
-            22 => "6".to_string(),
-            23 => "5".to_string(),
-            24 => "=".to_string(),
-            25 => "9".to_string(),
-            26 => "7".to_string(),
-            27 => "-".to_string(),
-            28 => "8".to_string(),
-            29 => "0".to_string(),
-            30 => "]".to_string(),
-            31 => "O".to_string(),
-            32 => "U".to_string(),
-            33 => "[".to_string(),
-            34 => "I".to_string(),
-            35 => "P".to_string(),
-            36 => "RETURN".to_string(),
-            37 => "L".to_string(),
-            38 => "J".to_string(),
-            39 => "'".to_string(),
-            40 => "K".to_string(),
-            41 => ";".to_string(),
-            42 => "\\".to_string(),
-            43 => ",".to_string(),
-            44 => "/".to_string(),
-            45 => "N".to_string(),
-            46 => "M".to_string(),
-            47 => ".".to_string(),
-            48 => "TAB".to_string(),
-            49 => "SPACE".to_string(),
-            50 => "`".to_string(),
-            51 => "BACKSPACE".to_string(),
-            53 => "ESCAPE".to_string(),
-            82 => "KP0".to_string(),
-            83 => "KP1".to_string(),
-            84 => "KP2".to_string(),
-            85 => "KP3".to_string(),
-            86 => "KP4".to_string(),
-            87 => "KP5".to_string(),
-            88 => "KP6".to_string(),
-            89 => "KP7".to_string(),
-            91 => "KP8".to_string(),
-            92 => "KP9".to_string(),
-            123 => "LEFT".to_string(),
-            124 => "RIGHT".to_string(),
-            125 => "DOWN".to_string(),
-            126 => "UP".to_string(),
-            _ => format!("KC{}", keycode),
+            0 => Some("A"),
+            1 => Some("S"),
+            2 => Some("D"),
+            3 => Some("F"),
+            4 => Some("H"),
+            5 => Some("G"),
+            6 => Some("Z"),
+            7 => Some("X"),
+            8 => Some("C"),
+            9 => Some("V"),
+            11 => Some("B"),
+            12 => Some("Q"),
+            13 => Some("W"),
+            14 => Some("E"),
+            15 => Some("R"),
+            16 => Some("Y"),
+            17 => Some("T"),
+            18 => Some("1"),
+            19 => Some("2"),
+            20 => Some("3"),
+            21 => Some("4"),
+            22 => Some("6"),
+            23 => Some("5"),
+            24 => Some("="),
+            25 => Some("9"),
+            26 => Some("7"),
+            27 => Some("-"),
+            28 => Some("8"),
+            29 => Some("0"),
+            30 => Some("]"),
+            31 => Some("O"),
+            32 => Some("U"),
+            33 => Some("["),
+            34 => Some("I"),
+            35 => Some("P"),
+            36 => Some("RETURN"),
+            37 => Some("L"),
+            38 => Some("J"),
+            39 => Some("'"),
+            40 => Some("K"),
+            41 => Some(";"),
+            42 => Some("\\"),
+            43 => Some(","),
+            44 => Some("/"),
+            45 => Some("N"),
+            46 => Some("M"),
+            47 => Some("."),
+            48 => Some("TAB"),
+            49 => Some("SPACE"),
+            50 => Some("`"),
+            51 => Some("BACKSPACE"),
+            53 => Some("ESCAPE"),
+            82 => Some("KP0"),
+            83 => Some("KP1"),
+            84 => Some("KP2"),
+            85 => Some("KP3"),
+            86 => Some("KP4"),
+            87 => Some("KP5"),
+            88 => Some("KP6"),
+            89 => Some("KP7"),
+            91 => Some("KP8"),
+            92 => Some("KP9"),
+            96 => Some("F5"),
+            97 => Some("F6"),
+            98 => Some("F7"),
+            99 => Some("F3"),
+            100 => Some("F8"),
+            101 => Some("F9"),
+            103 => Some("F11"),
+            105 => Some("F13"),
+            106 => Some("F16"),
+            107 => Some("F14"),
+            109 => Some("F10"),
+            111 => Some("F12"),
+            113 => Some("F15"),
+            114 => Some("HELP"),
+            115 => Some("HOME"),
+            116 => Some("PAGEUP"),
+            117 => Some("DELETE"),
+            118 => Some("F4"),
+            119 => Some("END"),
+            120 => Some("F2"),
+            121 => Some("PAGEDOWN"),
+            122 => Some("F1"),
+            123 => Some("LEFT"),
+            124 => Some("RIGHT"),
+            125 => Some("DOWN"),
+            126 => Some("UP"),
+            _ => None,
         }
     }
 }

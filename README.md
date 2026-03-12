@@ -70,6 +70,11 @@ cd /Users/shane/Project/serenity
 cargo run -- --debug
 ```
 
+Optional HUD font override (Cascadia Mono):
+- Place a TTF file at `assets/fonts/CascadiaMono-Regular.ttf` (or `assets/fonts/CascadiaMono.ttf`).
+- If found, HUD text uses SDL_ttf + Cascadia Mono.
+- If not found, HUD falls back to built-in 5x7 bitmap text.
+
 Interactive noise test (non-default):
 
 ```bash

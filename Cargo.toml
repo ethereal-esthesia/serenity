@@ -5,4 +5,4 @@ edition = "2024"
 default-run = "serenity"
 
 [dependencies]
-sdl3 = "*"
+sdl3 = { version = "*", features = ["ttf"] }
