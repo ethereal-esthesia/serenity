@@ -620,7 +620,11 @@ mod macos {
                     if guard.debug_enabled {
                         println!("[global_input] key_up kc={}", keycode);
                     }
-                    if !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes) {
+                    if guard.hid_consumer_active || !guard.injection_ts_by_usage.is_empty() {
+                        if guard.debug_enabled {
+                            println!("[global_input] key_up_ignored_injection_active kc={}", keycode);
+                        }
+                    } else if !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes) {
                         let label = keycode_label(keycode);
                         if guard.keys_down.contains(&label) {
                             guard.keys_down.remove(&label);
