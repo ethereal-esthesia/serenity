@@ -343,6 +343,7 @@ fn draw_key_debug_hud(
     #[cfg_attr(not(feature = "hud_ttf"), allow(unused_variables))]
     hud_font: Option<&HudFont>,
     keys_down: &[String],
+    optional_keys: &[String],
     mods: Mod,
     fn_mod: bool,
     show_mod_keycodes: bool,
@@ -393,13 +394,30 @@ fn draw_key_debug_hud(
     } else {
         format!("MODS {}", mods_active.join(" "))
     };
+    let row3_text = if optional_keys.is_empty() {
+        String::new()
+    } else {
+        format!("OPT {}", optional_keys.join(" + "))
+    };
     let pad = 10i32;
     #[cfg(feature = "hud_ttf")]
     if let Some(font) = hud_font {
         let (row1_w_px, row1_h_px) = font.size_of(&row1_text).unwrap_or((140, 20));
         let (row2_w_px, row2_h_px) = font.size_of(&row2_text).unwrap_or((140, 16));
-        let box_w = ((row1_w_px as i32).max(row2_w_px as i32) + pad * 2).max(140) as u32;
-        let box_h = (row1_h_px as i32 + row2_h_px as i32 + pad * 3) as u32;
+        let (row3_w_px, row3_h_px) = if row3_text.is_empty() {
+            (0, 0)
+        } else {
+            font.size_of(&row3_text).unwrap_or((140, 16))
+        };
+        let box_w = ((row1_w_px as i32)
+            .max(row2_w_px as i32)
+            .max(row3_w_px as i32)
+            + pad * 2)
+            .max(140) as u32;
+        let box_h = (row1_h_px as i32
+            + row2_h_px as i32
+            + row3_h_px as i32
+            + pad * if row3_text.is_empty() { 3 } else { 4 }) as u32;
         draw_rounded_box(canvas, 12, 12, box_w, box_h, 10, Color::RGB(16, 24, 36))?;
         draw_text_ttf(
             canvas,
@@ -419,12 +437,28 @@ fn draw_key_debug_hud(
             &row2_text,
             Color::RGB(186, 200, 220),
         )?;
+        if !row3_text.is_empty() {
+            draw_text_ttf(
+                canvas,
+                texture_creator,
+                font,
+                12 + pad,
+                12 + pad * 3 + row1_h_px as i32 + row2_h_px as i32,
+                &row3_text,
+                Color::RGB(170, 190, 210),
+            )?;
+        }
         return Ok(());
     }
 
     let row2_w = (row2_text.chars().count() as i32 * 6 - 1) * row2_scale;
-    let box_w = (row1_w.max(row2_w) + pad * 2).max(140) as u32;
-    let box_h = (row1_h + row2_h + pad * 3) as u32;
+    let row3_w = if row3_text.is_empty() {
+        0
+    } else {
+        (row3_text.chars().count() as i32 * 6 - 1) * row2_scale
+    };
+    let box_w = (row1_w.max(row2_w).max(row3_w) + pad * 2).max(140) as u32;
+    let box_h = (row1_h + row2_h + if row3_text.is_empty() { 0 } else { row2_h } + pad * if row3_text.is_empty() { 3 } else { 4 }) as u32;
     draw_rounded_box(canvas, 12, 12, box_w, box_h, 10, Color::RGB(16, 24, 36))?;
     draw_text_5x7(
         canvas,
@@ -442,6 +476,16 @@ fn draw_key_debug_hud(
         row2_scale,
         Color::RGB(186, 200, 220),
     )?;
+    if !row3_text.is_empty() {
+        draw_text_5x7(
+            canvas,
+            12 + pad,
+            12 + pad * 3 + row1_h + row2_h,
+            &row3_text,
+            row2_scale,
+            Color::RGB(170, 190, 210),
+        )?;
+    }
     Ok(())
 }
 
@@ -633,6 +677,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break 'running;
         }
         if !prev_window_focused && input_state.window_focused {
+            if let Some(capture) = &global_capture {
+                capture.notify_focus_gained();
+            }
             let tap_active = global_capture
                 .as_ref()
                 .map(|c| c.is_tap_active())
@@ -646,6 +693,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("[main:global_input] focus gained; tap already active, no schedule");
             }
         } else if prev_window_focused && !input_state.window_focused {
+            if let Some(capture) = &global_capture {
+                capture.notify_focus_lost();
+            }
             if attach_request_due.is_some() {
                 attach_request_due = None;
                 if debug {
@@ -718,7 +768,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         sync_cursor_visibility(&sdl, &mut input_state);
 
-        let (hud_keys, hud_mods, hud_fn) = if let Some(capture) = &global_capture {
+        let (hud_keys, hud_optional_keys, hud_mods, hud_fn) = if let Some(capture) = &global_capture {
             capture.set_capture_enabled(should_enable_global_capture(&input_state));
             let snap = capture.snapshot();
             if snap.active {
@@ -729,18 +779,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     break 'running;
                 }
-                (snap.keys_down, modifier_state_to_sdl_mod(snap.mods), snap.mods.fn_key)
+                let (optional, regular): (Vec<String>, Vec<String>) = snap
+                    .keys_down
+                    .into_iter()
+                    .partition(|k| k.contains("|HIDU"));
+                (
+                    regular,
+                    optional,
+                    modifier_state_to_sdl_mod(snap.mods),
+                    snap.mods.fn_key,
+                )
             } else {
-                (input_state.keys_down.clone(), sdl.keyboard().mod_state(), false)
+                (
+                    input_state.keys_down.clone(),
+                    Vec::new(),
+                    sdl.keyboard().mod_state(),
+                    false,
+                )
             }
         } else {
-            (input_state.keys_down.clone(), sdl.keyboard().mod_state(), false)
+            (
+                input_state.keys_down.clone(),
+                Vec::new(),
+                sdl.keyboard().mod_state(),
+                false,
+            )
         };
         draw_key_debug_hud(
             &mut canvas,
             &texture_creator,
             hud_font.as_ref(),
             &hud_keys,
+            &hud_optional_keys,
             hud_mods,
             hud_fn,
             naive_mod_detect,

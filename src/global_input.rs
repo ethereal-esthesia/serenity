@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::sync::mpsc::Sender;
@@ -46,6 +46,9 @@ struct SharedState {
     inferred_modifier_keycodes: BTreeSet<u16>,
     rejected_modifier_keycodes: BTreeSet<u16>,
     last_modifier_flags: Option<u64>,
+    hid_consumer_states: BTreeMap<u32, bool>,
+    hid_consumer_active: bool,
+    injection_ts_by_usage: BTreeMap<u32, Option<u64>>,
     mods: ModifierState,
     fn_mode: FnTrackingMode,
     fn_last_observed: Option<bool>,
@@ -64,6 +67,9 @@ impl Default for SharedState {
             inferred_modifier_keycodes: BTreeSet::new(),
             rejected_modifier_keycodes: BTreeSet::new(),
             last_modifier_flags: None,
+            hid_consumer_states: BTreeMap::new(),
+            hid_consumer_active: false,
+            injection_ts_by_usage: BTreeMap::new(),
             mods: ModifierState::default(),
             fn_mode: FnTrackingMode::Unavailable,
             fn_last_observed: None,
@@ -104,7 +110,30 @@ impl GlobalInputCapture {
     }
 
     pub fn snapshot(&self) -> InputSnapshot {
-        if let Ok(guard) = self.shared.lock() {
+        if let Ok(mut guard) = self.shared.lock() {
+            let to_stamp: Vec<u32> = guard
+                .injection_ts_by_usage
+                .iter()
+                .filter_map(|(usage, ts)| if ts.is_none() { Some(*usage) } else { None })
+                .collect();
+            if !to_stamp.is_empty() {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(d) => d.as_nanos() as u64,
+                    Err(_) => 0,
+                };
+                for usage in to_stamp {
+                    if let Some(ts_slot) = guard.injection_ts_by_usage.get_mut(&usage) {
+                        *ts_slot = Some(now);
+                        if guard.debug_enabled {
+                            println!(
+                                "[global_input] injection_ts_assigned usage=0x{:X} ts={}",
+                                usage, now
+                            );
+                        }
+                    }
+                }
+            }
             return InputSnapshot {
                 active: (guard.tap_active || guard.hid_active) && guard.capture_enabled,
                 keys_down: guard.keys_down.iter().cloned().collect(),
@@ -130,6 +159,9 @@ impl GlobalInputCapture {
                 guard.keys_down.clear();
                 guard.mods = ModifierState::default();
                 guard.last_modifier_flags = None;
+                guard.hid_consumer_states.clear();
+                guard.hid_consumer_active = false;
+                guard.injection_ts_by_usage.clear();
             }
         }
     }
@@ -138,6 +170,35 @@ impl GlobalInputCapture {
         #[cfg(target_os = "macos")]
         {
             let _ = self.control_tx.send(macos::ControlMessage::AttachRequested);
+        }
+    }
+
+    pub fn notify_focus_lost(&self) {
+        if let Ok(mut guard) = self.shared.lock() {
+            if guard.debug_enabled {
+                println!("[global_input] injection_start source=focus_loss kc=null ts=null");
+            }
+            for label in guard.keys_down.iter() {
+                if guard.debug_enabled {
+                    println!("[global_input] synthetic_key_up label={} ts=null", label);
+                }
+            }
+            guard.keys_down.clear();
+            guard.mods = ModifierState::default();
+            guard.last_modifier_flags = None;
+            guard.hid_consumer_states.clear();
+            guard.hid_consumer_active = false;
+            guard.injection_ts_by_usage.clear();
+        }
+    }
+
+    pub fn notify_focus_gained(&self) {
+        if let Ok(guard) = self.shared.lock() && guard.debug_enabled {
+            println!("[global_input] injection_end source=focus_gain kc=null ts=null");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos::sync_modifiers_from_system(&self.shared);
         }
     }
 }
@@ -163,6 +224,7 @@ mod macos {
     type CGEventMask = u64;
     type CGEventType = u32;
     type CGEventFlags = u64;
+    type CGEventSourceStateID = i32;
     type IOHIDManagerRef = *mut c_void;
     type IOHIDValueRef = *mut c_void;
     type IOHIDElementRef = *mut c_void;
@@ -201,6 +263,7 @@ mod macos {
     const K_CG_EVENT_FLAG_MASK_ALTERNATE: CGEventFlags = 0x0008_0000;
     const K_CG_EVENT_FLAG_MASK_COMMAND: CGEventFlags = 0x0010_0000;
     const K_CG_EVENT_FLAG_MASK_SECONDARY_FN: CGEventFlags = 0x0080_0000;
+    const K_CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE: CGEventSourceStateID = 1;
     const K_HID_PAGE_CONSUMER: u32 = 0x0C;
 
     pub enum ControlMessage {
@@ -224,6 +287,7 @@ mod macos {
         fn CGEventTapIsEnabled(tap: CFMachPortRef) -> Boolean;
         fn CGEventGetIntegerValueField(event: CGEventRef, field: i32) -> i64;
         fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
+        fn CGEventSourceFlagsState(state_id: CGEventSourceStateID) -> CGEventFlags;
 
         fn CFMachPortCreateRunLoopSource(
             allocator: CFAllocatorRef,
@@ -269,6 +333,37 @@ mod macos {
             run_tap_thread(shared, debug, rx);
         });
         tx
+    }
+
+    pub fn sync_modifiers_from_system(shared: &Arc<Mutex<SharedState>>) {
+        let flags = unsafe { CGEventSourceFlagsState(K_CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE) };
+        if let Ok(mut guard) = shared.lock() {
+            let prev_mods = guard.mods;
+            // Aggregate sync: side fidelity is unknown from this API, so normalize to left side.
+            let shift_on = flags & K_CG_EVENT_FLAG_MASK_SHIFT != 0;
+            let ctrl_on = flags & K_CG_EVENT_FLAG_MASK_CONTROL != 0;
+            let alt_on = flags & K_CG_EVENT_FLAG_MASK_ALTERNATE != 0;
+            let cmd_on = flags & K_CG_EVENT_FLAG_MASK_COMMAND != 0;
+            let caps_on = flags & K_CG_EVENT_FLAG_MASK_ALPHA_SHIFT != 0;
+            let fn_on = flags & K_CG_EVENT_FLAG_MASK_SECONDARY_FN != 0;
+            guard.mods.caps_lock = caps_on;
+            guard.mods.lshift = shift_on;
+            guard.mods.rshift = false;
+            guard.mods.lctrl = ctrl_on;
+            guard.mods.rctrl = false;
+            guard.mods.lalt = alt_on;
+            guard.mods.ralt = false;
+            guard.mods.lgui = cmd_on;
+            guard.mods.rgui = false;
+            guard.mods.fn_key = fn_on;
+            if guard.debug_enabled {
+                println!(
+                    "[global_input] focus_sync_mods flags=0x{:X} (aggregate)",
+                    flags
+                );
+                log_all_mod_edges(prev_mods, guard.mods);
+            }
+        }
     }
 
     fn start_hid_consumer_monitor(shared: Arc<Mutex<SharedState>>, debug: bool) {
@@ -404,6 +499,9 @@ mod macos {
                 guard.keys_down.clear();
                 guard.mods = ModifierState::default();
                 guard.last_modifier_flags = None;
+                guard.hid_consumer_states.clear();
+                guard.hid_consumer_active = false;
+                guard.injection_ts_by_usage.clear();
             }
         }
     }
@@ -427,17 +525,25 @@ mod macos {
             return;
         }
         let usage = unsafe { IOHIDElementGetUsage(element) };
+        if usage == u32::MAX || usage > 0xFFFF {
+            return;
+        }
         let int_value = unsafe { IOHIDValueGetIntegerValue(value) };
         let down = int_value != 0;
         if let Ok(mut guard) = shared.lock() {
             if !guard.capture_enabled {
                 return;
             }
-            let label = consumer_usage_label(usage);
+            let prev = guard.hid_consumer_states.get(&usage).copied();
+            if prev == Some(down) {
+                return;
+            }
+            guard.hid_consumer_states.insert(usage, down);
+            guard.hid_consumer_active = guard.hid_consumer_states.values().any(|v| *v);
             if down {
-                guard.keys_down.insert(label.clone());
+                begin_null_ts_injection(&mut guard, usage);
             } else {
-                guard.keys_down.remove(&label);
+                guard.injection_ts_by_usage.remove(&usage);
             }
             if guard.debug_enabled {
                 let edge = if down { "down" } else { "up" };
@@ -447,6 +553,23 @@ mod macos {
                 );
             }
         }
+    }
+
+    fn begin_null_ts_injection(guard: &mut SharedState, usage: u32) {
+        if guard.debug_enabled {
+            println!(
+                "[global_input] injection_start source=hid usage=0x{:X} ts=null",
+                usage
+            );
+        }
+        for label in guard.keys_down.iter() {
+            if guard.debug_enabled {
+                println!("[global_input] synthetic_key_up label={} ts=null", label);
+            }
+        }
+        guard.keys_down.clear();
+        guard.injection_ts_by_usage.clear();
+        guard.injection_ts_by_usage.insert(usage, None);
     }
 
     unsafe extern "C" fn event_tap_callback(
@@ -478,8 +601,19 @@ mod macos {
                     if guard.debug_enabled {
                         println!("[global_input] key_down kc={}", keycode);
                     }
-                    if !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes) {
-                        guard.keys_down.insert(keycode_label(keycode));
+                    if guard.hid_consumer_active {
+                        if guard.debug_enabled {
+                            println!("[global_input] key_down_ignored_hid_active kc={}", keycode);
+                        }
+                    } else if !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes) {
+                        let label = keycode_label(keycode);
+                        if guard.keys_down.contains(&label) {
+                            if guard.debug_enabled {
+                                println!("[global_input] key_down_ignored_duplicate kc={}", keycode);
+                            }
+                        } else {
+                            guard.keys_down.insert(label);
+                        }
                     }
                 }
                 K_CG_EVENT_KEY_UP => {
@@ -487,7 +621,12 @@ mod macos {
                         println!("[global_input] key_up kc={}", keycode);
                     }
                     if !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes) {
-                        guard.keys_down.remove(&keycode_label(keycode));
+                        let label = keycode_label(keycode);
+                        if guard.keys_down.contains(&label) {
+                            guard.keys_down.remove(&label);
+                        } else if guard.debug_enabled {
+                            println!("[global_input] key_up_ignored_duplicate kc={}", keycode);
+                        }
                     }
                 }
                 K_CG_EVENT_FLAGS_CHANGED => {
@@ -674,21 +813,6 @@ mod macos {
         } else {
             format!("KC{}", keycode)
         }
-    }
-
-    fn consumer_usage_label(usage: u32) -> String {
-        let name = match usage {
-            0xE2 => "MUTE",
-            0xE9 => "VOL_UP",
-            0xEA => "VOL_DOWN",
-            0xB5 => "SCAN_NEXT",
-            0xB6 => "SCAN_PREV",
-            0xB7 => "STOP",
-            0xB8 => "EJECT",
-            0xCD => "PLAY_PAUSE",
-            _ => "CONSUMER",
-        };
-        format!("{name}|HIDU{usage}")
     }
 
     fn keycode_name(keycode: u16) -> Option<&'static str> {
