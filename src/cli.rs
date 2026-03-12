@@ -1,6 +1,7 @@
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CommonRunConfig {
     pub debug: bool,
+    pub naive_mod_detect: bool,
     pub screenshot_path: Option<String>,
 }
 
@@ -12,6 +13,7 @@ pub fn parse_common_args_from(
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--debug" => config.debug = true,
+            "--naive-mod-detect" => config.naive_mod_detect = true,
             "--screenshot" => {
                 let path = args.next().ok_or_else(|| {
                     std::io::Error::new(
@@ -49,6 +51,7 @@ mod tests {
             cfg,
             CommonRunConfig {
                 debug: true,
+                naive_mod_detect: false,
                 screenshot_path: Some("/tmp/test.ppm".to_string()),
             }
         );
@@ -65,7 +68,22 @@ mod tests {
             cfg,
             CommonRunConfig {
                 debug: false,
+                naive_mod_detect: false,
                 screenshot_path: Some("/tmp/noise.ppm".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_naive_mod_detect() {
+        let cfg = parse_common_args_from(vec!["--naive-mod-detect".to_string()])
+            .expect("parse should succeed");
+        assert_eq!(
+            cfg,
+            CommonRunConfig {
+                debug: false,
+                naive_mod_detect: true,
+                screenshot_path: None,
             }
         );
     }

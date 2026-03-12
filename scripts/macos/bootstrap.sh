@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-WITH_TTF="${WITH_TTF:-0}" # 1 => install SDL3_ttf for --features hud_ttf builds
+WITH_TTF="${WITH_TTF:-1}" # 1 => install SDL3_ttf (default HUD path)
 SKIP_BREW_UPDATE="${SKIP_BREW_UPDATE:-0}"
 
 if ! command -v brew >/dev/null 2>&1; then
@@ -23,7 +23,7 @@ echo "[bootstrap] install required dependencies: sdl3"
 brew install sdl3
 
 if [[ "${WITH_TTF}" == "1" ]]; then
-  echo "[bootstrap] install optional HUD font dependency: sdl3_ttf"
+  echo "[bootstrap] install HUD font dependency: sdl3_ttf"
   brew install sdl3_ttf
 fi
 
@@ -41,9 +41,10 @@ echo "[bootstrap] running environment doctor"
 
 echo "[bootstrap] done"
 if [[ "${WITH_TTF}" == "1" ]]; then
-  echo "[bootstrap] TTF path enabled; use: cargo run --features hud_ttf -- --debug"
+  echo "[bootstrap] TTF path enabled by default; use: cargo run -- --debug"
 else
-  echo "[bootstrap] default path enabled; use: cargo run -- --debug"
-  echo "[bootstrap] to enable HUD TTF support later:"
-  echo "  WITH_TTF=1 scripts/macos/bootstrap.sh"
+  echo "[bootstrap] TTF path intentionally skipped; use no-default-features run path:"
+  echo "  cargo run --no-default-features -- --debug"
+  echo "[bootstrap] to enable default HUD TTF support later:"
+  echo "  WITH_TTF=1 ./scripts/macos/bootstrap.sh"
 fi

@@ -41,11 +41,11 @@ cd /Users/shane/Project/serenity
 ./scripts/macos/bootstrap.sh
 ```
 
-Bootstrap with optional HUD TTF dependency (`--features hud_ttf`):
+Bootstrap without HUD TTF dependency (opt-out path):
 
 ```bash
 cd /Users/shane/Project/serenity
-WITH_TTF=1 ./scripts/macos/bootstrap.sh
+WITH_TTF=0 ./scripts/macos/bootstrap.sh
 ```
 
 Validate environment at any time:
@@ -95,14 +95,21 @@ cargo run -- --debug
 
 Optional HUD font override (Cascadia Mono):
 - Place a TTF file at `assets/fonts/CascadiaMono-Regular.ttf` (or `assets/fonts/CascadiaMono.ttf`).
-- If found, HUD text uses SDL_ttf + Cascadia Mono.
+- By default, HUD text uses SDL_ttf + Cascadia Mono when the font is present.
 - If not found, HUD falls back to built-in 5x7 bitmap text.
 - Bundled Cascadia font licensing: SIL OFL 1.1 (see `assets/fonts/CASCADIA-LICENSE.txt`).
-- Build with HUD TTF path enabled:
+- Build with HUD TTF path explicitly:
 
 ```bash
 cd /Users/shane/Project/serenity
 cargo run --features hud_ttf -- --debug
+```
+
+Opt-out run path (disable default TTF feature):
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run --no-default-features -- --debug
 ```
 
 Interactive noise test (non-default):

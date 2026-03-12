@@ -5,7 +5,7 @@ edition = "2024"
 default-run = "serenity"
 
 [features]
-default = []
+default = ["hud_ttf"]
 hud_ttf = ["sdl3/ttf"]
 
 [dependencies]

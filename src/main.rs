@@ -1,7 +1,7 @@
 use serenity::cli::{CommonRunConfig, parse_common_args_from};
 use serenity::global_input::{GlobalInputCapture, ModifierState};
 use serenity::runtime::input::{
-    WindowInputState, process_events, should_enable_global_capture, sync_cursor_visibility,
+    WindowInputState, process_events_with_debug, should_enable_global_capture, sync_cursor_visibility,
 };
 use sdl3::keyboard::Mod;
 use sdl3::pixels::Color;
@@ -344,6 +344,8 @@ fn draw_key_debug_hud(
     hud_font: Option<&HudFont>,
     keys_down: &[String],
     mods: Mod,
+    fn_mod: bool,
+    show_mod_keycodes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let row1_text = if keys_down.is_empty() {
         "KEYS".to_string()
@@ -356,29 +358,35 @@ fn draw_key_debug_hud(
     let row2_scale = 1i32;
     let row2_h = 7 * row2_scale;
     let mut mods_active: Vec<&str> = Vec::new();
+    if mods.contains(Mod::CAPSMOD) {
+        mods_active.push(if show_mod_keycodes { "CAPS|KC57" } else { "CAPS" });
+    }
     if mods.contains(Mod::LSHIFTMOD) {
-        mods_active.push("LSHIFT");
+        mods_active.push(if show_mod_keycodes { "LSHIFT|KC56" } else { "LSHIFT" });
     }
     if mods.contains(Mod::RSHIFTMOD) {
-        mods_active.push("RSHIFT");
+        mods_active.push(if show_mod_keycodes { "RSHIFT|KC60" } else { "RSHIFT" });
     }
     if mods.contains(Mod::LCTRLMOD) {
-        mods_active.push("LCTRL");
+        mods_active.push(if show_mod_keycodes { "LCTRL|KC59" } else { "LCTRL" });
     }
     if mods.contains(Mod::RCTRLMOD) {
-        mods_active.push("RCTRL");
+        mods_active.push(if show_mod_keycodes { "RCTRL|KC62" } else { "RCTRL" });
     }
     if mods.contains(Mod::LALTMOD) {
-        mods_active.push("LALT");
+        mods_active.push(if show_mod_keycodes { "LALT|KC58" } else { "LALT" });
     }
     if mods.contains(Mod::RALTMOD) {
-        mods_active.push("RALT");
+        mods_active.push(if show_mod_keycodes { "RALT|KC61" } else { "RALT" });
     }
     if mods.contains(Mod::LGUIMOD) {
-        mods_active.push("LGUI");
+        mods_active.push(if show_mod_keycodes { "LGUI|KC55" } else { "LGUI" });
     }
     if mods.contains(Mod::RGUIMOD) {
-        mods_active.push("RGUI");
+        mods_active.push(if show_mod_keycodes { "RGUI|KC54" } else { "RGUI" });
+    }
+    if fn_mod {
+        mods_active.push(if show_mod_keycodes { "FN|KC63" } else { "FN" });
     }
     let row2_text = if mods_active.is_empty() {
         "MODS".to_string()
@@ -538,6 +546,9 @@ fn load_hud_font(debug: bool) -> Option<HudFont> {
 
 fn modifier_state_to_sdl_mod(mods: ModifierState) -> Mod {
     let mut out = Mod::NOMOD;
+    if mods.caps_lock {
+        out |= Mod::CAPSMOD;
+    }
     if mods.lshift {
         out |= Mod::LSHIFTMOD;
     }
@@ -568,6 +579,7 @@ fn modifier_state_to_sdl_mod(mods: ModifierState) -> Mod {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let run = parse_args()?;
     let debug = run.debug;
+    let naive_mod_detect = run.naive_mod_detect;
     let mut screenshot_path = run.screenshot_path;
     let deband = DebandConfig {
         seed: 0x5EED_F00D,
@@ -578,6 +590,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let palette = Palette256::SoftSky;
     if debug {
         println!("[main] debug enabled");
+        if naive_mod_detect {
+            println!("[main] naive modifier detection enabled");
+        }
     }
 
     let sdl = sdl3::init()?;
@@ -614,7 +629,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
     'running: loop {
-        if process_events(&mut events, &mut input_state) {
+        if process_events_with_debug(&mut events, &mut input_state, debug) {
             break 'running;
         }
         if !prev_window_focused && input_state.window_focused {
@@ -630,8 +645,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else if debug {
                 println!("[main:global_input] focus gained; tap already active, no schedule");
             }
-        } else if prev_window_focused && !input_state.window_focused && debug {
-            println!("[main:global_input] focus lost; attach schedule unchanged");
+        } else if prev_window_focused && !input_state.window_focused {
+            if attach_request_due.is_some() {
+                attach_request_due = None;
+                if debug {
+                    println!("[main:global_input] focus lost; canceled pending attach schedule");
+                }
+            } else if debug {
+                println!("[main:global_input] focus lost; no pending attach schedule");
+            }
         }
         prev_window_focused = input_state.window_focused;
 
@@ -663,7 +685,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !input_state.window_shown {
             canvas.window_mut().show();
             input_state.window_shown = true;
-            global_capture = Some(GlobalInputCapture::start_with_debug(debug));
+            global_capture = Some(GlobalInputCapture::start_with_options(
+                debug,
+                naive_mod_detect,
+            ));
             if let Some(capture) = &global_capture {
                 if debug {
                     println!("[main:global_input] window shown; requesting initial attach now");
@@ -693,7 +718,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         sync_cursor_visibility(&sdl, &mut input_state);
 
-        let (hud_keys, hud_mods) = if let Some(capture) = &global_capture {
+        let (hud_keys, hud_mods, hud_fn) = if let Some(capture) = &global_capture {
             capture.set_capture_enabled(should_enable_global_capture(&input_state));
             let snap = capture.snapshot();
             if snap.active {
@@ -704,14 +729,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     break 'running;
                 }
-                (snap.keys_down, modifier_state_to_sdl_mod(snap.mods))
+                (snap.keys_down, modifier_state_to_sdl_mod(snap.mods), snap.mods.fn_key)
             } else {
-                (input_state.keys_down.clone(), sdl.keyboard().mod_state())
+                (input_state.keys_down.clone(), sdl.keyboard().mod_state(), false)
             }
         } else {
-            (input_state.keys_down.clone(), sdl.keyboard().mod_state())
+            (input_state.keys_down.clone(), sdl.keyboard().mod_state(), false)
         };
-        draw_key_debug_hud(&mut canvas, &texture_creator, hud_font.as_ref(), &hud_keys, hud_mods)?;
+        draw_key_debug_hud(
+            &mut canvas,
+            &texture_creator,
+            hud_font.as_ref(),
+            &hud_keys,
+            hud_mods,
+            hud_fn,
+            naive_mod_detect,
+        )?;
         let _ = canvas.present();
         if debug && let Some((fps, frame_ms)) = fps_counter.tick() {
             println!("[main:fps] fps={:.1} frame_ms={:.3}", fps, frame_ms);

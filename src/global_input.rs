@@ -5,6 +5,7 @@ use std::sync::mpsc::Sender;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ModifierState {
+    pub caps_lock: bool,
     pub lshift: bool,
     pub rshift: bool,
     pub lctrl: bool,
@@ -13,6 +14,16 @@ pub struct ModifierState {
     pub ralt: bool,
     pub lgui: bool,
     pub rgui: bool,
+    pub fn_key: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FnTrackingMode {
+    #[default]
+    Unavailable,
+    Probing,
+    Unreliable,
+    Reliable,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -20,15 +31,42 @@ pub struct InputSnapshot {
     pub active: bool,
     pub keys_down: Vec<String>,
     pub mods: ModifierState,
+    pub fn_mode: FnTrackingMode,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SharedState {
     tap_active: bool,
     capture_enabled: bool,
     recreate_requested: bool,
+    debug_enabled: bool,
+    naive_mod_detect: bool,
     keys_down: BTreeSet<String>,
+    inferred_modifier_keycodes: BTreeSet<u16>,
+    rejected_modifier_keycodes: BTreeSet<u16>,
+    last_modifier_flags: Option<u64>,
     mods: ModifierState,
+    fn_mode: FnTrackingMode,
+    fn_last_observed: Option<bool>,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self {
+            tap_active: false,
+            capture_enabled: false,
+            recreate_requested: false,
+            debug_enabled: false,
+            naive_mod_detect: false,
+            keys_down: BTreeSet::new(),
+            inferred_modifier_keycodes: BTreeSet::new(),
+            rejected_modifier_keycodes: BTreeSet::new(),
+            last_modifier_flags: None,
+            mods: ModifierState::default(),
+            fn_mode: FnTrackingMode::Unavailable,
+            fn_last_observed: None,
+        }
+    }
 }
 
 pub struct GlobalInputCapture {
@@ -39,11 +77,19 @@ pub struct GlobalInputCapture {
 
 impl GlobalInputCapture {
     pub fn start() -> Self {
-        Self::start_with_debug(false)
+        Self::start_with_options(false, false)
     }
 
     pub fn start_with_debug(debug: bool) -> Self {
+        Self::start_with_options(debug, false)
+    }
+
+    pub fn start_with_options(debug: bool, naive_mod_detect: bool) -> Self {
         let shared = Arc::new(Mutex::new(SharedState::default()));
+        if let Ok(mut guard) = shared.lock() {
+            guard.debug_enabled = debug;
+            guard.naive_mod_detect = naive_mod_detect;
+        }
         #[cfg(target_os = "macos")]
         let control_tx = macos::start_event_tap(shared.clone(), debug);
         #[cfg(not(target_os = "macos"))]
@@ -61,6 +107,7 @@ impl GlobalInputCapture {
                 active: guard.tap_active && guard.capture_enabled,
                 keys_down: guard.keys_down.iter().cloned().collect(),
                 mods: guard.mods,
+                fn_mode: guard.fn_mode,
             };
         }
         InputSnapshot::default()
@@ -80,6 +127,7 @@ impl GlobalInputCapture {
             if !enabled {
                 guard.keys_down.clear();
                 guard.mods = ModifierState::default();
+                guard.last_modifier_flags = None;
             }
         }
     }
@@ -94,7 +142,8 @@ impl GlobalInputCapture {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{ModifierState, SharedState};
+    use super::{FnTrackingMode, ModifierState, SharedState};
+    use std::collections::BTreeSet;
     use std::ffi::c_void;
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::sync::{Arc, Mutex};
@@ -132,9 +181,11 @@ mod macos {
     const K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT: CGEventType = 0xFFFF_FFFF;
     const K_CG_KEYBOARD_EVENT_KEYCODE: i32 = 9;
     const K_CG_EVENT_FLAG_MASK_SHIFT: CGEventFlags = 0x0002_0000;
+    const K_CG_EVENT_FLAG_MASK_ALPHA_SHIFT: CGEventFlags = 0x0001_0000;
     const K_CG_EVENT_FLAG_MASK_CONTROL: CGEventFlags = 0x0004_0000;
     const K_CG_EVENT_FLAG_MASK_ALTERNATE: CGEventFlags = 0x0008_0000;
     const K_CG_EVENT_FLAG_MASK_COMMAND: CGEventFlags = 0x0010_0000;
+    const K_CG_EVENT_FLAG_MASK_SECONDARY_FN: CGEventFlags = 0x0080_0000;
 
     pub enum ControlMessage {
         AttachRequested,
@@ -228,6 +279,8 @@ mod macos {
                 if let Ok(mut guard) = shared.lock() {
                     guard.tap_active = true;
                     guard.recreate_requested = false;
+                    guard.fn_mode = FnTrackingMode::Probing;
+                    guard.fn_last_observed = None;
                 }
                 let run_loop = CFRunLoopGetCurrent();
                 CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
@@ -272,6 +325,7 @@ mod macos {
             if !active {
                 guard.keys_down.clear();
                 guard.mods = ModifierState::default();
+                guard.last_modifier_flags = None;
             }
         }
     }
@@ -302,18 +356,88 @@ mod macos {
             }
             match event_type {
                 K_CG_EVENT_KEY_DOWN => {
-                    if !is_modifier_keycode(keycode) {
+                    if guard.debug_enabled {
+                        println!("[global_input] key_down kc={}", keycode);
+                    }
+                    if !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes) {
                         guard.keys_down.insert(keycode_label(keycode));
                     }
                 }
                 K_CG_EVENT_KEY_UP => {
-                    if !is_modifier_keycode(keycode) {
+                    if guard.debug_enabled {
+                        println!("[global_input] key_up kc={}", keycode);
+                    }
+                    if !is_modifier_keycode(keycode, &guard.inferred_modifier_keycodes) {
                         guard.keys_down.remove(&keycode_label(keycode));
                     }
                 }
                 K_CG_EVENT_FLAGS_CHANGED => {
                     let flags = unsafe { CGEventGetFlags(event) };
+                    if guard.debug_enabled {
+                        println!(
+                            "[global_input] flags_changed kc={} flags=0x{:X}",
+                            keycode, flags
+                        );
+                    }
+                    let prev_flags = guard.last_modifier_flags.unwrap_or(flags);
+                    let changed_mask = (prev_flags ^ flags) & tracked_modifier_flag_mask();
+                    if guard.naive_mod_detect
+                        && !known_modifier_keycode(keycode)
+                        && !guard.rejected_modifier_keycodes.contains(&keycode)
+                        && !guard.inferred_modifier_keycodes.contains(&keycode)
+                    {
+                        if changed_mask != 0 {
+                            let inserted = guard.inferred_modifier_keycodes.insert(keycode);
+                        if inserted && guard.debug_enabled {
+                            println!(
+                                "[global_input] inferred_modifier kc={} changed_mask=0x{:X}",
+                                keycode,
+                                changed_mask
+                            );
+                        }
+                    } else {
+                        guard.rejected_modifier_keycodes.insert(keycode);
+                        if guard.debug_enabled {
+                            println!(
+                                "[global_input] inferred_non_modifier kc={} (first seen without modifier-flag change)",
+                                keycode
+                            );
+                        }
+                    }
+                    } else if guard.naive_mod_detect
+                        && !known_modifier_keycode(keycode)
+                        && changed_mask != 0
+                    {
+                        // Already classified as inferred/rejected; keep current classification.
+                    }
+                    guard.last_modifier_flags = Some(flags);
+                    let prev_mods = guard.mods;
+                    let fn_on = flags & K_CG_EVENT_FLAG_MASK_SECONDARY_FN != 0;
+                    let prev_mode = guard.fn_mode;
+                    if guard.fn_mode == FnTrackingMode::Probing {
+                        let changed = guard.fn_last_observed.map(|prev| prev != fn_on).unwrap_or(false);
+                        if keycode == 63 {
+                            guard.fn_mode = FnTrackingMode::Reliable;
+                        } else if changed {
+                            guard.fn_mode = FnTrackingMode::Unreliable;
+                        }
+                    }
+                    if guard.debug_enabled && guard.fn_mode != prev_mode {
+                        println!(
+                            "[global_input] fn tracking mode {:?} -> {:?} (keycode={} fn_on={})",
+                            prev_mode, guard.fn_mode, keycode, fn_on
+                        );
+                    }
+                    guard.mods.fn_key = if guard.fn_mode == FnTrackingMode::Reliable {
+                        fn_on
+                    } else {
+                        false
+                    };
+                    guard.fn_last_observed = Some(fn_on);
                     apply_modifier_change(keycode, flags, &mut guard.mods);
+                    if guard.debug_enabled {
+                        log_all_mod_edges(prev_mods, guard.mods);
+                    }
                 }
                 _ => {}
             }
@@ -333,8 +457,41 @@ mod macos {
         }
     }
 
-    fn is_modifier_keycode(keycode: u16) -> bool {
-        matches!(keycode, 54 | 55 | 56 | 58 | 59 | 60 | 61 | 62)
+    fn known_modifier_keycode(keycode: u16) -> bool {
+        matches!(keycode, 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63)
+    }
+
+    fn is_modifier_keycode(keycode: u16, inferred_modifier_keycodes: &BTreeSet<u16>) -> bool {
+        known_modifier_keycode(keycode) || inferred_modifier_keycodes.contains(&keycode)
+    }
+
+    fn tracked_modifier_flag_mask() -> CGEventFlags {
+        K_CG_EVENT_FLAG_MASK_ALPHA_SHIFT
+            | K_CG_EVENT_FLAG_MASK_SHIFT
+            | K_CG_EVENT_FLAG_MASK_CONTROL
+            | K_CG_EVENT_FLAG_MASK_ALTERNATE
+            | K_CG_EVENT_FLAG_MASK_COMMAND
+            | K_CG_EVENT_FLAG_MASK_SECONDARY_FN
+    }
+
+    fn log_mod_edge_raw(kc: u16, prev: bool, now: bool) {
+        if prev != now {
+            let edge = if now { "mod_down" } else { "mod_up" };
+            println!("[global_input] {edge} kc={kc}");
+        }
+    }
+
+    fn log_all_mod_edges(prev: ModifierState, now: ModifierState) {
+        log_mod_edge_raw(57, prev.caps_lock, now.caps_lock);
+        log_mod_edge_raw(56, prev.lshift, now.lshift);
+        log_mod_edge_raw(60, prev.rshift, now.rshift);
+        log_mod_edge_raw(59, prev.lctrl, now.lctrl);
+        log_mod_edge_raw(62, prev.rctrl, now.rctrl);
+        log_mod_edge_raw(58, prev.lalt, now.lalt);
+        log_mod_edge_raw(61, prev.ralt, now.ralt);
+        log_mod_edge_raw(55, prev.lgui, now.lgui);
+        log_mod_edge_raw(54, prev.rgui, now.rgui);
+        log_mod_edge_raw(63, prev.fn_key, now.fn_key);
     }
 
     fn should_passthrough_debug_combo(
@@ -353,20 +510,42 @@ mod macos {
     }
 
     fn apply_modifier_change(keycode: u16, flags: CGEventFlags, mods: &mut ModifierState) {
+        let caps_on = flags & K_CG_EVENT_FLAG_MASK_ALPHA_SHIFT != 0;
         let shift_on = flags & K_CG_EVENT_FLAG_MASK_SHIFT != 0;
         let ctrl_on = flags & K_CG_EVENT_FLAG_MASK_CONTROL != 0;
         let alt_on = flags & K_CG_EVENT_FLAG_MASK_ALTERNATE != 0;
         let cmd_on = flags & K_CG_EVENT_FLAG_MASK_COMMAND != 0;
+        // Caps lock is latched and represented directly by the aggregate flag.
+        mods.caps_lock = caps_on;
         match keycode {
-            56 => mods.lshift = shift_on,
-            60 => mods.rshift = shift_on,
-            59 => mods.lctrl = ctrl_on,
-            62 => mods.rctrl = ctrl_on,
-            58 => mods.lalt = alt_on,
-            61 => mods.ralt = alt_on,
-            55 => mods.lgui = cmd_on,
-            54 => mods.rgui = cmd_on,
+            // flagsChanged arrives for each physical modifier key transition.
+            // Toggle per-side state on that keycode, then reconcile with aggregate
+            // flags to avoid stuck state when events are missed.
+            56 => mods.lshift = !mods.lshift,
+            60 => mods.rshift = !mods.rshift,
+            59 => mods.lctrl = !mods.lctrl,
+            62 => mods.rctrl = !mods.rctrl,
+            58 => mods.lalt = !mods.lalt,
+            61 => mods.ralt = !mods.ralt,
+            55 => mods.lgui = !mods.lgui,
+            54 => mods.rgui = !mods.rgui,
             _ => {}
+        }
+        if !shift_on {
+            mods.lshift = false;
+            mods.rshift = false;
+        }
+        if !ctrl_on {
+            mods.lctrl = false;
+            mods.rctrl = false;
+        }
+        if !alt_on {
+            mods.lalt = false;
+            mods.ralt = false;
+        }
+        if !cmd_on {
+            mods.lgui = false;
+            mods.rgui = false;
         }
     }
 

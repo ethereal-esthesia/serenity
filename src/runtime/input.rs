@@ -44,6 +44,7 @@ pub fn is_modifier_key(keycode: Keycode) -> bool {
 pub fn process_events_with_keydown(
     events: &mut sdl3::EventPump,
     state: &mut WindowInputState,
+    debug: bool,
     mut on_keydown: impl FnMut(Keycode) -> bool,
 ) -> bool {
     for event in events.poll_iter() {
@@ -61,6 +62,9 @@ pub fn process_events_with_keydown(
                 repeat: false,
                 ..
             } => {
+                if debug {
+                    println!("[local_input] key_down {:?}", keycode);
+                }
                 if keycode == Keycode::Escape {
                     return true;
                 }
@@ -79,6 +83,9 @@ pub fn process_events_with_keydown(
                 repeat: false,
                 ..
             } => {
+                if debug {
+                    println!("[local_input] key_up {:?}", keycode);
+                }
                 if !is_modifier_key(keycode) {
                     let label = keycode_label(keycode);
                     state.keys_down.retain(|k| k != &label);
@@ -90,8 +97,16 @@ pub fn process_events_with_keydown(
     false
 }
 
+pub fn process_events_with_debug(
+    events: &mut sdl3::EventPump,
+    state: &mut WindowInputState,
+    debug: bool,
+) -> bool {
+    process_events_with_keydown(events, state, debug, |_| false)
+}
+
 pub fn process_events(events: &mut sdl3::EventPump, state: &mut WindowInputState) -> bool {
-    process_events_with_keydown(events, state, |_| false)
+    process_events_with_keydown(events, state, false, |_| false)
 }
 
 pub fn sync_cursor_visibility(sdl: &sdl3::Sdl, state: &mut WindowInputState) {
