@@ -32,6 +32,29 @@ Serenity targets low-complexity 3D scenes where clarity and motion quality matte
 
 Project scaffold is initialized. Engine modules and render loop are in progress.
 
+## Setup (macOS)
+
+Bootstrap required dependencies:
+
+```bash
+cd /Users/shane/Project/serenity
+./scripts/macos/bootstrap.sh
+```
+
+Bootstrap with optional HUD TTF dependency (`--features hud_ttf`):
+
+```bash
+cd /Users/shane/Project/serenity
+WITH_TTF=1 ./scripts/macos/bootstrap.sh
+```
+
+Validate environment at any time:
+
+```bash
+cd /Users/shane/Project/serenity
+./scripts/macos/doctor.sh
+```
+
 ## Run
 
 ```bash
@@ -75,6 +98,12 @@ Optional HUD font override (Cascadia Mono):
 - If found, HUD text uses SDL_ttf + Cascadia Mono.
 - If not found, HUD falls back to built-in 5x7 bitmap text.
 - Bundled Cascadia font licensing: SIL OFL 1.1 (see `assets/fonts/CASCADIA-LICENSE.txt`).
+- Build with HUD TTF path enabled:
+
+```bash
+cd /Users/shane/Project/serenity
+cargo run --features hud_ttf -- --debug
+```
 
 Interactive noise test (non-default):
 
@@ -103,3 +132,13 @@ cargo test
 ```
 
 See [TESTING.md](./TESTING.md) for full test and data-dump examples.
+
+## CI Prep
+
+For a future GitHub macOS build, install the same native deps used locally:
+
+```bash
+brew install sdl3
+# optional, only if building with --features hud_ttf
+brew install sdl3_ttf
+```
