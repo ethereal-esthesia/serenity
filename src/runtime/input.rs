@@ -7,6 +7,7 @@ pub struct WindowInputState {
     pub window_focused: bool,
     pub mouse_inside_window: bool,
     pub cursor_hidden: bool,
+    pub thread_panel_scroll_lines: i32,
     pub keys_down: Vec<String>,
 }
 
@@ -47,6 +48,7 @@ pub fn process_events_with_keydown(
     debug: bool,
     mut on_keydown: impl FnMut(Keycode) -> bool,
 ) -> bool {
+    state.thread_panel_scroll_lines = 0;
     for event in events.poll_iter() {
         match event {
             Event::Quit { .. } => return true,
@@ -90,6 +92,9 @@ pub fn process_events_with_keydown(
                     let label = keycode_label(keycode);
                     state.keys_down.retain(|k| k != &label);
                 }
+            }
+            Event::MouseWheel { y, .. } => {
+                state.thread_panel_scroll_lines += y.round() as i32;
             }
             _ => {}
         }

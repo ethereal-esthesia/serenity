@@ -43,6 +43,58 @@ struct RenderState<'a> {
     pixels: PixelBuffer,
 }
 
+struct ThreadEventPanel {
+    lines: Vec<String>,
+    scroll_from_bottom: usize,
+}
+
+impl ThreadEventPanel {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            scroll_from_bottom: 0,
+        }
+    }
+
+    fn set_lines(&mut self, lines: Vec<String>) {
+        self.lines = lines;
+        let max = self.max_scroll_for_rows(6);
+        if self.scroll_from_bottom > max {
+            self.scroll_from_bottom = max;
+        }
+    }
+
+    fn scroll_lines(&mut self, delta_lines: i32, visible_rows: usize) {
+        if self.lines.is_empty() || delta_lines == 0 {
+            return;
+        }
+        if delta_lines > 0 {
+            self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(delta_lines as usize);
+        } else {
+            self.scroll_from_bottom = self
+                .scroll_from_bottom
+                .saturating_sub((-delta_lines) as usize);
+        }
+        let max = self.max_scroll_for_rows(visible_rows);
+        if self.scroll_from_bottom > max {
+            self.scroll_from_bottom = max;
+        }
+    }
+
+    fn max_scroll_for_rows(&self, visible_rows: usize) -> usize {
+        self.lines.len().saturating_sub(visible_rows)
+    }
+
+    fn visible_lines(&self, visible_rows: usize) -> &[String] {
+        if self.lines.is_empty() {
+            return &[];
+        }
+        let end = self.lines.len().saturating_sub(self.scroll_from_bottom);
+        let start = end.saturating_sub(visible_rows);
+        &self.lines[start..end]
+    }
+}
+
 impl FpsCounter {
     fn new() -> Self {
         Self {
@@ -458,7 +510,10 @@ fn draw_key_debug_hud(
         (row3_text.chars().count() as i32 * 6 - 1) * row2_scale
     };
     let box_w = (row1_w.max(row2_w).max(row3_w) + pad * 2).max(140) as u32;
-    let box_h = (row1_h + row2_h + if row3_text.is_empty() { 0 } else { row2_h } + pad * if row3_text.is_empty() { 3 } else { 4 }) as u32;
+    let box_h = (row1_h
+        + row2_h
+        + if row3_text.is_empty() { 0 } else { row2_h }
+        + pad * if row3_text.is_empty() { 3 } else { 4 }) as u32;
     draw_rounded_box(canvas, 12, 12, box_w, box_h, 10, Color::RGB(16, 24, 36))?;
     draw_text_5x7(
         canvas,
@@ -484,6 +539,71 @@ fn draw_key_debug_hud(
             &row3_text,
             row2_scale,
             Color::RGB(170, 190, 210),
+        )?;
+    }
+    Ok(())
+}
+
+fn draw_thread_event_panel(
+    canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+    #[cfg_attr(not(feature = "hud_ttf"), allow(unused_variables))]
+    texture_creator: &TextureCreator<sdl3::video::WindowContext>,
+    #[cfg_attr(not(feature = "hud_ttf"), allow(unused_variables))]
+    hud_font: Option<&HudFont>,
+    panel: &ThreadEventPanel,
+    x: i32,
+    y: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let title = "THREAD EVENTS";
+    let visible_rows = 6usize;
+    let lines = panel.visible_lines(visible_rows);
+    let pad = 8i32;
+    let row_h = 16i32;
+    let box_w = 700u32;
+    let box_h = (pad * 2 + row_h * (1 + visible_rows as i32)) as u32;
+    draw_rounded_box(canvas, x, y, box_w, box_h, 10, Color::RGB(14, 20, 30))?;
+
+    #[cfg(feature = "hud_ttf")]
+    if let Some(font) = hud_font {
+        draw_text_ttf(
+            canvas,
+            texture_creator,
+            font,
+            x + pad,
+            y + pad,
+            title,
+            Color::RGB(196, 220, 242),
+        )?;
+        for (i, line) in lines.iter().rev().enumerate() {
+            draw_text_ttf(
+                canvas,
+                texture_creator,
+                font,
+                x + pad,
+                y + pad + row_h * (i as i32 + 1),
+                line,
+                Color::RGB(150, 170, 190),
+            )?;
+        }
+        return Ok(());
+    }
+
+    draw_text_5x7(
+        canvas,
+        x + pad,
+        y + pad,
+        title,
+        1,
+        Color::RGB(196, 220, 242),
+    )?;
+    for (i, line) in lines.iter().rev().enumerate() {
+        draw_text_5x7(
+            canvas,
+            x + pad,
+            y + pad + row_h * (i as i32 + 1),
+            line,
+            1,
+            Color::RGB(150, 170, 190),
         )?;
     }
     Ok(())
@@ -667,8 +787,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fps_counter = FpsCounter::new();
     let neon_start = Instant::now();
     let mut input_state = WindowInputState::with_cursor_hidden(true);
+    let mut thread_panel = ThreadEventPanel::new();
     let mut prev_window_focused = false;
     let mut attach_request_due: Option<Instant> = None;
+    let mut initial_attach_pending = true;
     let mut global_capture: Option<GlobalInputCapture> = None;
     println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
@@ -684,13 +806,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_ref()
                 .map(|c| c.is_tap_active())
                 .unwrap_or(false);
-            if !tap_active {
+            if initial_attach_pending && !tap_active {
+                if let Some(capture) = &global_capture {
+                    capture.request_attach();
+                }
+                initial_attach_pending = false;
+                if debug {
+                    println!("[main:global_input] focus gained; requesting initial attach now");
+                }
+            } else if !tap_active {
                 attach_request_due = Some(Instant::now() + Duration::from_secs(10));
                 if debug {
                     println!("[main:global_input] focus gained; scheduling attach in 10s");
                 }
             } else if debug {
                 println!("[main:global_input] focus gained; tap already active, no schedule");
+                initial_attach_pending = false;
             }
         } else if prev_window_focused && !input_state.window_focused {
             if let Some(capture) = &global_capture {
@@ -733,17 +864,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         canvas.copy(&render.texture, None, None)?;
         if !input_state.window_shown {
-            canvas.window_mut().show();
+            {
+                let window = canvas.window_mut();
+                window.show();
+                window.raise();
+            }
             input_state.window_shown = true;
             global_capture = Some(GlobalInputCapture::start_with_options(
                 debug,
                 naive_mod_detect,
             ));
-            if let Some(capture) = &global_capture {
-                if debug {
-                    println!("[main:global_input] window shown; requesting initial attach now");
-                }
-                capture.request_attach();
+            if debug {
+                println!("[main:global_input] window shown; waiting for focus before initial attach");
             }
         }
         if let (Some(capture), Some(due)) = (&global_capture, attach_request_due)
@@ -768,9 +900,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         sync_cursor_visibility(&sdl, &mut input_state);
 
+        thread_panel.scroll_lines(input_state.thread_panel_scroll_lines, 6);
         let (hud_keys, hud_optional_keys, hud_mods, hud_fn) = if let Some(capture) = &global_capture {
             capture.set_capture_enabled(should_enable_global_capture(&input_state));
             let snap = capture.snapshot();
+            thread_panel.set_lines(snap.thread_events);
             if snap.active {
                 if snap
                     .keys_down
@@ -782,7 +916,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (optional, regular): (Vec<String>, Vec<String>) = snap
                     .keys_down
                     .into_iter()
-                    .partition(|k| k.contains("|HIDU"));
+                    .partition(|k| k.contains("|HIDU") || k.contains("INJ|"));
                 (
                     regular,
                     optional,
@@ -798,6 +932,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }
         } else {
+            thread_panel.set_lines(Vec::new());
             (
                 input_state.keys_down.clone(),
                 Vec::new(),
@@ -814,6 +949,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hud_mods,
             hud_fn,
             naive_mod_detect,
+        )?;
+        draw_thread_event_panel(
+            &mut canvas,
+            &texture_creator,
+            hud_font.as_ref(),
+            &thread_panel,
+            12,
+            170,
         )?;
         let _ = canvas.present();
         if debug && let Some((fps, frame_ms)) = fps_counter.tick() {
