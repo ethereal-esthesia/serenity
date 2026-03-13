@@ -7,10 +7,18 @@ enum SlotState {
     Ready(u64),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct FrameTiming {
+    request_sim_time_ns: u64,
+    compute_start_ns: u64,
+    compute_end_ns: u64,
+}
+
 #[derive(Debug)]
 struct Slot {
     pixels: Vec<u16>,
     state: SlotState,
+    timing: FrameTiming,
 }
 
 #[derive(Debug)]
@@ -34,6 +42,7 @@ pub struct WriteFrameBuffer {
     width: u32,
     height: u32,
     pixels: Option<Vec<u16>>,
+    timing: FrameTiming,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +50,9 @@ pub struct ReadFrameBuffer {
     pub width: u32,
     pub height: u32,
     pub sequence: u64,
+    pub request_sim_time_ns: u64,
+    pub compute_start_ns: u64,
+    pub compute_end_ns: u64,
     pub pixels: Vec<u16>,
 }
 
@@ -51,6 +63,7 @@ pub trait FrameBufferSource {
     fn get_next_frame_buffer(&self) -> Option<Self::WriteFrame>;
     fn publish_frame(&self, write_frame: Self::WriteFrame);
     fn get_latest_frame(&self) -> Option<Self::ReadFrame>;
+    fn get_latest_frame_after(&self, last_sequence: u64) -> Option<Self::ReadFrame>;
     fn dimensions(&self) -> (u32, u32);
     fn buffer_count(&self) -> usize;
 }
@@ -66,6 +79,7 @@ impl FrameBufferPool {
             slots.push(Slot {
                 pixels: vec![0; len],
                 state: SlotState::Free,
+                timing: FrameTiming::default(),
             });
         }
         Self {
@@ -83,10 +97,12 @@ impl FrameBufferPool {
         inner: &mut Inner,
         slot_index: usize,
         pixels: Vec<u16>,
+        timing: FrameTiming,
         publish: bool,
     ) {
         let slot = &mut inner.slots[slot_index];
         slot.pixels = pixels;
+        slot.timing = timing;
         if publish {
             let seq = inner.next_seq;
             inner.next_seq = inner.next_seq.saturating_add(1);
@@ -113,6 +129,19 @@ impl WriteFrameBuffer {
             .expect("write frame pixels missing")
             .as_mut_slice()
     }
+
+    pub fn set_frame_timing(
+        &mut self,
+        request_sim_time_ns: u64,
+        compute_start_ns: u64,
+        compute_end_ns: u64,
+    ) {
+        self.timing = FrameTiming {
+            request_sim_time_ns,
+            compute_start_ns,
+            compute_end_ns,
+        };
+    }
 }
 
 impl Drop for WriteFrameBuffer {
@@ -121,7 +150,13 @@ impl Drop for WriteFrameBuffer {
             return;
         };
         if let Ok(mut inner) = self.pool.lock() {
-            FrameBufferPool::release_write_slot(&mut inner, self.slot_index, pixels, false);
+            FrameBufferPool::release_write_slot(
+                &mut inner,
+                self.slot_index,
+                pixels,
+                self.timing,
+                false,
+            );
         }
     }
 }
@@ -148,6 +183,7 @@ impl FrameBufferSource for FrameBufferPool {
             width: inner.width,
             height: inner.height,
             pixels: Some(pixels),
+            timing: FrameTiming::default(),
         })
     }
 
@@ -156,7 +192,13 @@ impl FrameBufferSource for FrameBufferPool {
             return;
         };
         if let Ok(mut inner) = self.inner.lock() {
-            FrameBufferPool::release_write_slot(&mut inner, write_frame.slot_index, pixels, true);
+            FrameBufferPool::release_write_slot(
+                &mut inner,
+                write_frame.slot_index,
+                pixels,
+                write_frame.timing,
+                true,
+            );
         }
     }
 
@@ -172,6 +214,31 @@ impl FrameBufferSource for FrameBufferPool {
             width: inner.width,
             height: inner.height,
             sequence,
+            request_sim_time_ns: slot.timing.request_sim_time_ns,
+            compute_start_ns: slot.timing.compute_start_ns,
+            compute_end_ns: slot.timing.compute_end_ns,
+            pixels: slot.pixels.clone(),
+        })
+    }
+
+    fn get_latest_frame_after(&self, last_sequence: u64) -> Option<Self::ReadFrame> {
+        let inner = self.inner.lock().ok()?;
+        let idx = inner.latest_ready_index?;
+        let slot = &inner.slots[idx];
+        let sequence = match slot.state {
+            SlotState::Ready(seq) => seq,
+            _ => return None,
+        };
+        if sequence <= last_sequence {
+            return None;
+        }
+        Some(ReadFrameBuffer {
+            width: inner.width,
+            height: inner.height,
+            sequence,
+            request_sim_time_ns: slot.timing.request_sim_time_ns,
+            compute_start_ns: slot.timing.compute_start_ns,
+            compute_end_ns: slot.timing.compute_end_ns,
             pixels: slot.pixels.clone(),
         })
     }
@@ -201,6 +268,7 @@ mod tests {
     fn publish_and_read_latest_frame() {
         let pool = FrameBufferPool::new(4, 2, 3);
         let mut write = pool.get_next_frame_buffer().expect("write frame");
+        write.set_frame_timing(1_000, 1_010, 1_030);
         for (i, p) in write.pixels_mut().iter_mut().enumerate() {
             *p = i as u16;
         }
@@ -211,6 +279,9 @@ mod tests {
         assert_eq!(read.height, 2);
         assert_eq!(read.pixels, vec![0, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(read.sequence, 1);
+        assert_eq!(read.request_sim_time_ns, 1_000);
+        assert_eq!(read.compute_start_ns, 1_010);
+        assert_eq!(read.compute_end_ns, 1_030);
     }
 
     #[test]
@@ -224,5 +295,33 @@ mod tests {
             pool.get_latest_frame().is_none(),
             "dropped (unpublished) frame should not become latest"
         );
+    }
+
+    #[test]
+    fn get_latest_frame_after_only_returns_newer_frames() {
+        let pool = FrameBufferPool::new(2, 2, 2);
+        let mut write1 = pool.get_next_frame_buffer().expect("write1");
+        write1.set_frame_timing(2_000, 2_010, 2_030);
+        write1.pixels_mut()[0] = 1;
+        pool.publish_frame(write1);
+        let first = pool.get_latest_frame().expect("first frame");
+        assert_eq!(first.sequence, 1);
+        assert!(
+            pool.get_latest_frame_after(first.sequence).is_none(),
+            "no newer frame yet"
+        );
+
+        let mut write2 = pool.get_next_frame_buffer().expect("write2");
+        write2.set_frame_timing(3_000, 3_020, 3_050);
+        write2.pixels_mut()[0] = 2;
+        pool.publish_frame(write2);
+        let second = pool
+            .get_latest_frame_after(first.sequence)
+            .expect("newer frame");
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.pixels[0], 2);
+        assert_eq!(second.request_sim_time_ns, 3_000);
+        assert_eq!(second.compute_start_ns, 3_020);
+        assert_eq!(second.compute_end_ns, 3_050);
     }
 }

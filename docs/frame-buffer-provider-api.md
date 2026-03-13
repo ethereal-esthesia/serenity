@@ -14,12 +14,18 @@ Producer-side:
 
 1. `get_next_frame_buffer()` acquires the next writable frame buffer (if available).
 2. Producer writes pixels only to the acquired write frame.
+3. Producer may attach raw timing markers:
+   - `request_sim_time_ns`
+   - `compute_start_ns`
+   - `compute_end_ns`
 3. `publish_frame(write_frame)` marks the frame as latest completed output.
 
 Consumer-side:
 
 1. `get_latest_frame()` returns the latest published frame snapshot.
 2. Consumer should treat returned data as immutable.
+3. `get_latest_frame_after(last_sequence)` returns only a strictly newer frame, enabling non-blocking "continue while waiting" loops without reprocessing the same frame.
+4. Consumers compute deltas/jitter from raw timestamps; provider does not precompute durations.
 
 ## Current Rust Types
 
