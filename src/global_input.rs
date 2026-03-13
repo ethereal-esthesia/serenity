@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+use crate::runtime::timestamp::InputTimestamp;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ModifierState {
@@ -25,23 +26,6 @@ pub enum FnTrackingMode {
     Probing,
     Unreliable,
     Reliable,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct InputTimestamp(u64);
-
-impl InputTimestamp {
-    pub fn now() -> Self {
-        Self(raw_now_timestamp())
-    }
-
-    pub fn from_raw(raw: u64) -> Self {
-        Self(raw & TS_PAYLOAD_MASK)
-    }
-
-    pub fn raw(self) -> u64 {
-        self.0
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,16 +127,9 @@ impl Default for SharedState {
 }
 
 const MAX_PENDING_EVENTS: usize = 512;
-const TS_PAYLOAD_MASK: u64 = 0x7FFF_FFFF_FFFF_FFFF;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(4);
 const CONSUMER_WATCHDOG_POLL: Duration = Duration::from_millis(100);
 const CONSUMER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(4);
-static TS_START: OnceLock<Instant> = OnceLock::new();
-
-fn raw_now_timestamp() -> u64 {
-    let start = TS_START.get_or_init(Instant::now);
-    (start.elapsed().as_nanos() as u64) & TS_PAYLOAD_MASK
-}
 
 macro_rules! global_key_log {
     ($($arg:tt)*) => {
@@ -1424,6 +1401,7 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::timestamp::InputTimestamp;
     use std::sync::{Arc, Mutex};
 
     #[cfg(test)]
@@ -1594,4 +1572,5 @@ mod tests {
         assert_eq!(event.alias, "O");
         assert_eq!(event.keycode, Some(31));
     }
+
 }

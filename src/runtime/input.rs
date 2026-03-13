@@ -3,9 +3,9 @@ use sdl3::keyboard::Mod;
 use sdl3::keyboard::Keycode;
 
 use crate::global_input::{
-    GlobalInputCapture, InputEvent, InputEventKind, InputKeyState, InputTimestamp,
-    ModifierState,
+    GlobalInputCapture, InputEvent, InputEventKind, InputKeyState, ModifierState,
 };
+use crate::runtime::timestamp::InputTimestamp;
 
 macro_rules! local_key_log {
     ($($arg:tt)*) => {

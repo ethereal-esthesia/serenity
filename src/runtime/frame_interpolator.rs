@@ -1,4 +1,4 @@
-use crate::global_input::InputTimestamp;
+use crate::runtime::timestamp::InputTimestamp;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TimedFrameRef<'a> {
@@ -291,7 +291,7 @@ impl FrameInterpolator {
 
 #[cfg(test)]
 mod tests {
-    use crate::global_input::InputTimestamp;
+    use crate::runtime::timestamp::InputTimestamp;
 
     use super::{FrameInterpolator, InterpolationError, RenderFrameGate, RenderGateError, TimedFrameRef};
 

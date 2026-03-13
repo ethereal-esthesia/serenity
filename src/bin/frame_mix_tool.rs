@@ -1,5 +1,5 @@
-use serenity::global_input::InputTimestamp;
 use serenity::runtime::frame_interpolator::{FrameInterpolator, InterpolationError};
+use serenity::runtime::timestamp::InputTimestamp;
 
 fn parse_csv_ts(input: &str) -> Result<Vec<InputTimestamp>, String> {
     let mut out = Vec::new();

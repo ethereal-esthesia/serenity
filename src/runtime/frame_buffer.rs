@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::global_input::InputTimestamp;
+use crate::runtime::timestamp::InputTimestamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlotState {
@@ -264,7 +264,7 @@ impl FrameBufferSource for FrameBufferPool {
 
 #[cfg(test)]
 mod tests {
-    use crate::global_input::InputTimestamp;
+    use crate::runtime::timestamp::InputTimestamp;
 
     use super::{FrameBufferPool, FrameBufferSource};
 
