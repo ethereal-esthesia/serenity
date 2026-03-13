@@ -417,7 +417,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     print_config("Current:", cfg);
     'running: loop {
-        if process_events_with_keydown(&mut events, &mut input_state, false, |keycode| {
+        if process_events_with_keydown(&mut events, &mut input_state, false, |keycode, _repeat| {
             handle_keydown(
                 keycode,
                 &mut cfg,

@@ -1,9 +1,8 @@
 use serenity::cli::{CommonRunConfig, parse_common_args_from};
-use serenity::global_input::{
-    GlobalInputCapture, InputEvent, InputEventKind, InputTimestamp, ModifierState,
-};
+use serenity::global_input::{GlobalInputCapture, InputEvent, InputEventKind};
 use serenity::runtime::input::{
-    WindowInputState, process_events_with_debug, should_enable_global_capture, sync_cursor_visibility,
+    WindowInputState, keycode_label, process_events_with_keydown, resolve_input_frame_view,
+    sync_cursor_visibility,
 };
 use sdl3::keyboard::Mod;
 use sdl3::pixels::Color;
@@ -749,41 +748,10 @@ fn load_hud_font(debug: bool) -> Option<HudFont> {
     None
 }
 
-fn modifier_state_to_sdl_mod(mods: ModifierState) -> Mod {
-    let mut out = Mod::NOMOD;
-    if mods.caps_lock {
-        out |= Mod::CAPSMOD;
-    }
-    if mods.lshift {
-        out |= Mod::LSHIFTMOD;
-    }
-    if mods.rshift {
-        out |= Mod::RSHIFTMOD;
-    }
-    if mods.lctrl {
-        out |= Mod::LCTRLMOD;
-    }
-    if mods.rctrl {
-        out |= Mod::RCTRLMOD;
-    }
-    if mods.lalt {
-        out |= Mod::LALTMOD;
-    }
-    if mods.ralt {
-        out |= Mod::RALTMOD;
-    }
-    if mods.lgui {
-        out |= Mod::LGUIMOD;
-    }
-    if mods.rgui {
-        out |= Mod::RGUIMOD;
-    }
-    out
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let run = parse_args()?;
     let debug = run.debug;
+    let disable_global_input = run.disable_global_input;
     let mut screenshot_path = run.screenshot_path;
     let deband = DebandConfig {
         seed: 0x5EED_F00D,
@@ -795,6 +763,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if debug {
         println!("[main] debug enabled");
         println!("[main] naive modifier detection enabled");
+        if disable_global_input {
+            println!("[main] global capture disabled via --disable-global-input");
+        }
     }
 
     let sdl = sdl3::init()?;
@@ -833,41 +804,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Neon pattern mode (default, neon accents). Press Esc to quit.");
 
     'running: loop {
-        if process_events_with_debug(&mut events, &mut input_state, debug) {
+        if process_events_with_keydown(&mut events, &mut input_state, debug, |keycode, repeat| {
+            if !disable_global_input && let Some(capture) = &global_capture {
+                let alias = keycode_label(keycode);
+                capture.on_local_sdl_keydown_for_probe(&alias, repeat);
+            }
+            false
+        }) {
             break 'running;
         }
-        if let Some(capture) = &global_capture {
-            for sdl_alias in &input_state.keydown_events {
-                let _ = capture.try_lock_probe_alias(sdl_alias);
-            }
-        }
         if !prev_window_focused && input_state.window_focused {
-            if let Some(capture) = &global_capture {
+            if !disable_global_input && let Some(capture) = &global_capture {
                 capture.notify_focus_gained();
             }
-            let tap_active = global_capture
-                .as_ref()
-                .map(|c| c.is_tap_active())
-                .unwrap_or(false);
-            if initial_attach_pending && !tap_active {
-                if let Some(capture) = &global_capture {
-                    capture.request_attach();
+            if !disable_global_input {
+                let tap_active = global_capture
+                    .as_ref()
+                    .map(|c| c.is_tap_active())
+                    .unwrap_or(false);
+                if initial_attach_pending && !tap_active {
+                    if let Some(capture) = &global_capture {
+                        capture.request_attach();
+                    }
+                    initial_attach_pending = false;
+                    if debug {
+                        println!("[main:global_input] focus gained; requesting initial attach now");
+                    }
+                } else if !tap_active {
+                    attach_request_due = Some(Instant::now() + Duration::from_secs(10));
+                    if debug {
+                        println!("[main:global_input] focus gained; scheduling attach in 10s");
+                    }
+                } else if debug {
+                    println!("[main:global_input] focus gained; tap already active, no schedule");
+                    initial_attach_pending = false;
                 }
-                initial_attach_pending = false;
-                if debug {
-                    println!("[main:global_input] focus gained; requesting initial attach now");
-                }
-            } else if !tap_active {
-                attach_request_due = Some(Instant::now() + Duration::from_secs(10));
-                if debug {
-                    println!("[main:global_input] focus gained; scheduling attach in 10s");
-                }
-            } else if debug {
-                println!("[main:global_input] focus gained; tap already active, no schedule");
-                initial_attach_pending = false;
             }
         } else if prev_window_focused && !input_state.window_focused {
-            if let Some(capture) = &global_capture {
+            if !disable_global_input && let Some(capture) = &global_capture {
                 capture.notify_focus_lost();
             }
             if attach_request_due.is_some() {
@@ -913,15 +887,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window.raise();
             }
             input_state.window_shown = true;
-            global_capture = Some(GlobalInputCapture::start_with_options(
-                debug,
-                true,
-            ));
-            if debug {
-                println!("[main:global_input] window shown; waiting for focus before initial attach");
+            if !disable_global_input {
+                global_capture = Some(GlobalInputCapture::start_with_options(
+                    debug,
+                    true,
+                ));
+                if debug {
+                    println!("[main:global_input] window shown; waiting for focus before initial attach");
+                }
             }
         }
-        if let (Some(capture), Some(due)) = (&global_capture, attach_request_due)
+        if !disable_global_input
+            && let (Some(capture), Some(due)) = (&global_capture, attach_request_due)
             && input_state.window_focused
             && Instant::now() >= due
         {
@@ -931,7 +908,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             capture.request_attach();
             attach_request_due = None;
         }
-        if let Some(capture) = &global_capture
+        if !disable_global_input
+            && let Some(capture) = &global_capture
             && capture.is_tap_active()
             && attach_request_due.is_some()
         {
@@ -944,53 +922,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sync_cursor_visibility(&sdl, &mut input_state);
 
         thread_panel.scroll_lines(input_state.thread_panel_scroll_lines, 6);
-        let (hud_keys, hud_optional_keys, hud_mods, hud_fn) = if let Some(capture) = &global_capture {
-            capture.set_capture_enabled(should_enable_global_capture(&input_state));
-            let deadline = InputTimestamp::now();
-            while let Some(event) = capture.next_event_before(deadline) {
-                thread_panel.push_line(format_input_event_for_panel(&event));
-            }
-            let snap = capture.snapshot();
-            if snap.active {
-                if snap.keys_down.iter().any(|k| k.alias == "ESCAPE") {
-                    break 'running;
-                }
-                let regular: Vec<String> = snap
-                    .keys_down
-                    .iter()
-                    .map(|k| format_key_for_hud(&k.alias, k.keycode))
-                    .collect();
-                let optional: Vec<String> = Vec::new();
-                (
-                    regular,
-                    optional,
-                    modifier_state_to_sdl_mod(snap.mods),
-                    snap.mods.fn_key,
-                )
-            } else {
-                (
-                    input_state.keys_down.clone(),
-                    Vec::new(),
-                    sdl.keyboard().mod_state(),
-                    false,
-                )
-            }
-        } else {
-            (
-                input_state.keys_down.clone(),
-                Vec::new(),
-                sdl.keyboard().mod_state(),
-                false,
-            )
-        };
+        if let Some(capture) = &global_capture {
+            capture.note_consumer_heartbeat();
+        }
+        let frame = resolve_input_frame_view(
+            &input_state,
+            global_capture.as_ref(),
+            disable_global_input,
+            sdl.keyboard().mod_state(),
+        );
+        for event in &frame.thread_events {
+            thread_panel.push_line(format_input_event_for_panel(event));
+        }
+        if frame.should_quit {
+            break 'running;
+        }
         draw_key_debug_hud(
             &mut canvas,
             &texture_creator,
             hud_font.as_ref(),
-            &hud_keys,
-            &hud_optional_keys,
-            hud_mods,
-            hud_fn,
+            &frame.hud_keys,
+            &frame.hud_optional_keys,
+            frame.hud_mods,
+            frame.hud_fn,
             true,
         )?;
         draw_thread_event_panel(

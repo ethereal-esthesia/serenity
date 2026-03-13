@@ -2,6 +2,7 @@
 pub struct CommonRunConfig {
     pub debug: bool,
     pub naive_mod_detect: bool,
+    pub disable_global_input: bool,
     pub screenshot_path: Option<String>,
 }
 
@@ -14,6 +15,7 @@ pub fn parse_common_args_from(
         match arg.as_str() {
             "--debug" => config.debug = true,
             "--naive-mod-detect" => config.naive_mod_detect = true,
+            "--disable-global-input" => config.disable_global_input = true,
             "--screenshot" => {
                 let path = args.next().ok_or_else(|| {
                     std::io::Error::new(
@@ -52,6 +54,7 @@ mod tests {
             CommonRunConfig {
                 debug: true,
                 naive_mod_detect: false,
+                disable_global_input: false,
                 screenshot_path: Some("/tmp/test.ppm".to_string()),
             }
         );
@@ -69,6 +72,7 @@ mod tests {
             CommonRunConfig {
                 debug: false,
                 naive_mod_detect: false,
+                disable_global_input: false,
                 screenshot_path: Some("/tmp/noise.ppm".to_string()),
             }
         );
@@ -83,6 +87,22 @@ mod tests {
             CommonRunConfig {
                 debug: false,
                 naive_mod_detect: true,
+                disable_global_input: false,
+                screenshot_path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_disable_global_input() {
+        let cfg = parse_common_args_from(vec!["--disable-global-input".to_string()])
+            .expect("parse should succeed");
+        assert_eq!(
+            cfg,
+            CommonRunConfig {
+                debug: false,
+                naive_mod_detect: false,
+                disable_global_input: true,
                 screenshot_path: None,
             }
         );
