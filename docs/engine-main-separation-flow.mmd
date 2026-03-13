@@ -1,0 +1,33 @@
+flowchart TD
+    A["Process Start"] --> B["main(): Parse args + init SDL/window/render assets"]
+    B --> C["Build RuntimeEngine\n(owns input orchestration + state transitions)"]
+    C --> D["Enter thin main loop"]
+
+    D --> E["main pumps SDL events"]
+    E --> F["main forwards local SDL input facts to engine queue\n(non-blocking publish only)"]
+    F --> G["main calls engine.tick(now)"]
+
+    G --> H["Engine updates capture state\n(focus/cursor/capture-enabled policy)"]
+    H --> I["Engine note_consumer_heartbeat()"]
+    I --> J["Engine drains sanitized input events + snapshot"]
+
+    J --> K["main renders frame from engine snapshot\n(HUD/event panel consume unified payload)"]
+    K --> L["present()"]
+    L --> M{"Quit requested?"}
+    M -->|No| D
+    M -->|Yes| Z["Shutdown + cursor restore"]
+
+    N["CG/HID thread"] --> O["Raw global key events"]
+    O --> P["Global input state machine\n(atomic mutation under lock)"]
+    P --> J
+
+    Q["Local SDL probe resolver thread"] --> R["Consume SDL alias queue"]
+    R --> P
+
+    S["Watchdog thread"] --> T{"Heartbeat stale > timeout?"}
+    T -->|Yes| U["Fail-open: disable effective capture + clear held state"]
+    T -->|No| V["No action"]
+    U --> P
+    V --> P
+
+    W["Rule: no domain/input logic in main"] --> D

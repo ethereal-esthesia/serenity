@@ -1,8 +1,8 @@
 # Serenity
 
-Indexed-color render engine for simple 3D geometries.
+Serenity Engine: indexed-color runtime engine focused on deterministic rendering and decoupled input processing.
 
-Serenity is built around a small, deterministic rendering core with a focus on:
+Serenity Engine is built around a small, deterministic runtime core with a focus on:
 
 - Accurate motion
 - Fluid animation
@@ -11,7 +11,7 @@ Serenity is built around a small, deterministic rendering core with a focus on:
 
 ## Vision
 
-Serenity targets low-complexity 3D scenes where clarity and motion quality matter more than heavyweight rendering features.
+Serenity Engine targets low-complexity 3D scenes where clarity and motion quality matter more than heavyweight rendering features, while enforcing input/runtime behavior that is independent of render-loop jitter.
 
 ## Core Principles
 
@@ -19,6 +19,8 @@ Serenity targets low-complexity 3D scenes where clarity and motion quality matte
 - Stable frame-to-frame behavior
 - Transparency as a first-class feature
 - Predictable camera and object motion models
+- Input processing decoupled from render cadence
+- Fail-open input safety under stalls
 
 ## Initial Scope
 
@@ -30,7 +32,7 @@ Serenity targets low-complexity 3D scenes where clarity and motion quality matte
 
 ## Status
 
-Project scaffold is initialized. Engine modules and render loop are in progress.
+Project scaffold is initialized. Runtime engine modules are in progress, including active refactor toward thin-main orchestration and engine-owned input state transitions.
 
 ## Setup (macOS)
 
@@ -130,6 +132,9 @@ cargo run --bin noise_texture_test -- --screenshot /tmp/serenity_noise.ppm
 
 See [`docs/runtime-input-control-flow.md`](docs/runtime-input-control-flow.md) for the main runtime/input diagram and walkthrough.
 See [`docs/global-input-permission-flow.md`](docs/global-input-permission-flow.md) for the OS permission + silent fallback flow.
+See [`docs/engine-main-separation-flow.md`](docs/engine-main-separation-flow.md) for thin-main engine architecture.
+See [`docs/key-input-worker-refactor.md`](docs/key-input-worker-refactor.md) for input worker/fail-open refactor plan.
+See [`docs/serenity-engine-checklist.md`](docs/serenity-engine-checklist.md) for the high-effort execution checklist.
 
 ## Test
 
