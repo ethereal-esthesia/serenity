@@ -295,6 +295,26 @@ mod tests {
 
     use super::{FrameInterpolator, InterpolationError, RenderFrameGate, RenderGateError, TimedFrameRef};
 
+    fn hz_to_period_ns(hz: f64) -> u64 {
+        ((1_000_000_000.0 / hz).round() as u64).max(1)
+    }
+
+    fn generate_timestamps_ns(duration_ns: u64, segments: &[(u64, f64)]) -> Vec<u64> {
+        assert!(!segments.is_empty(), "segments must not be empty");
+        let mut out = Vec::new();
+        let mut t = 0u64;
+        let mut seg_idx = 0usize;
+        while t <= duration_ns {
+            out.push(t);
+            while seg_idx + 1 < segments.len() && t >= segments[seg_idx].0 {
+                seg_idx += 1;
+            }
+            let hz = segments[seg_idx].1;
+            t = t.saturating_add(hz_to_period_ns(hz));
+        }
+        out
+    }
+
     #[test]
     fn interpolate_none_for_empty_input() {
         assert_eq!(
@@ -502,5 +522,102 @@ mod tests {
                 current_ts: IoTimestamp::from_raw(200)
             }
         );
+    }
+
+    #[test]
+    fn simulation_120hz_input_to_23hz_output() {
+        let duration_ns = 2_000_000_000u64;
+        let input_ts: Vec<IoTimestamp> = generate_timestamps_ns(duration_ns, &[(duration_ns, 120.0)])
+            .into_iter()
+            .map(IoTimestamp::from_raw)
+            .collect();
+        let output_targets =
+            generate_timestamps_ns(duration_ns, &[(duration_ns, 23.0)]);
+
+        let mut interpolated = 0usize;
+        for t in output_targets {
+            let mix = FrameInterpolator::mix_from_timestamps(&input_ts, IoTimestamp::from_raw(t))
+                .expect("mix");
+            assert!(mix.alpha_0_to_1 >= 0.0 && mix.alpha_0_to_1 <= 1.0);
+            if mix.alpha_0_to_1 > 0.0 && mix.alpha_0_to_1 < 1.0 {
+                interpolated += 1;
+            }
+        }
+        assert!(interpolated > 0, "expected non-trivial interpolation for 120->23 conversion");
+    }
+
+    #[test]
+    fn simulation_23hz_input_to_120hz_output() {
+        let duration_ns = 2_000_000_000u64;
+        let input_ts: Vec<IoTimestamp> = generate_timestamps_ns(duration_ns, &[(duration_ns, 23.0)])
+            .into_iter()
+            .map(IoTimestamp::from_raw)
+            .collect();
+        let output_targets =
+            generate_timestamps_ns(duration_ns, &[(duration_ns, 120.0)]);
+
+        let mut interpolated = 0usize;
+        for t in output_targets {
+            let mix = FrameInterpolator::mix_from_timestamps(&input_ts, IoTimestamp::from_raw(t))
+                .expect("mix");
+            assert!(mix.alpha_0_to_1 >= 0.0 && mix.alpha_0_to_1 <= 1.0);
+            if mix.alpha_0_to_1 > 0.0 && mix.alpha_0_to_1 < 1.0 {
+                interpolated += 1;
+            }
+        }
+        assert!(interpolated > 0, "expected non-trivial interpolation for 23->120 conversion");
+    }
+
+    #[test]
+    fn simulation_midstream_input_rate_change() {
+        let duration_ns = 3_000_000_000u64;
+        // 120Hz through ~1s, then 30Hz.
+        let input_ts: Vec<IoTimestamp> = generate_timestamps_ns(
+            duration_ns,
+            &[(1_000_000_000, 120.0), (duration_ns, 30.0)],
+        )
+        .into_iter()
+        .map(IoTimestamp::from_raw)
+        .collect();
+        let output_targets =
+            generate_timestamps_ns(duration_ns, &[(duration_ns, 60.0)]);
+
+        for t in output_targets {
+            let mix = FrameInterpolator::mix_from_timestamps(&input_ts, IoTimestamp::from_raw(t))
+                .expect("mix");
+            assert!(mix.alpha_0_to_1 >= 0.0 && mix.alpha_0_to_1 <= 1.0);
+            assert!(mix.left_timestamp <= mix.right_timestamp);
+        }
+    }
+
+    #[test]
+    fn simulation_midstream_input_and_output_rate_changes() {
+        let duration_ns = 3_000_000_000u64;
+        let input_ts: Vec<IoTimestamp> = generate_timestamps_ns(
+            duration_ns,
+            &[
+                (1_000_000_000, 120.0),
+                (2_000_000_000, 48.0),
+                (duration_ns, 24.0),
+            ],
+        )
+        .into_iter()
+        .map(IoTimestamp::from_raw)
+        .collect();
+        let output_targets = generate_timestamps_ns(
+            duration_ns,
+            &[
+                (1_000_000_000, 23.0),
+                (2_000_000_000, 60.0),
+                (duration_ns, 30.0),
+            ],
+        );
+
+        for t in output_targets {
+            let mix = FrameInterpolator::mix_from_timestamps(&input_ts, IoTimestamp::from_raw(t))
+                .expect("mix");
+            assert!(mix.alpha_0_to_1 >= 0.0 && mix.alpha_0_to_1 <= 1.0);
+            assert!(mix.left_timestamp <= mix.right_timestamp);
+        }
     }
 }
