@@ -3,7 +3,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::runtime::timestamp::InputTimestamp;
+use crate::runtime::io_timestamp::IoTimestamp;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ModifierState {
@@ -37,7 +37,7 @@ pub enum InputEventKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputEvent {
-    pub timestamp: Option<InputTimestamp>,
+    pub timestamp: Option<IoTimestamp>,
     pub kind: InputEventKind,
     pub alias: String,
     pub keycode: Option<u16>,
@@ -91,7 +91,7 @@ struct SharedState {
 struct LocalSdlKeydown {
     alias: String,
     repeat: bool,
-    ts: InputTimestamp,
+    ts: IoTimestamp,
 }
 
 impl Default for SharedState {
@@ -135,7 +135,7 @@ macro_rules! global_key_log {
     ($($arg:tt)*) => {
         println!(
             "[global_input ts={}] {}",
-            InputTimestamp::now().raw(),
+            IoTimestamp::current_time().raw(),
             format!($($arg)*)
         );
     };
@@ -219,7 +219,7 @@ fn apply_probe_alias_lock(guard: &mut SharedState, sdl_alias: &str) -> Option<(u
         queue_event(
             guard,
             InputEvent {
-                timestamp: Some(InputTimestamp::now()),
+                timestamp: Some(IoTimestamp::current_time()),
                 kind: InputEventKind::KeyDown,
                 alias: alias.clone(),
                 keycode: Some(kc),
@@ -333,7 +333,7 @@ impl GlobalInputCapture {
         InputSnapshot::default()
     }
 
-    pub fn next_event_before(&self, deadline: InputTimestamp) -> Option<InputEvent> {
+    pub fn next_event_before(&self, deadline: IoTimestamp) -> Option<InputEvent> {
         if let Ok(mut guard) = self.shared.lock() {
             expire_probe_if_timed_out(&mut guard);
             if guard.probe_pending_keycode.is_some() {
@@ -385,7 +385,7 @@ impl GlobalInputCapture {
         let evt = LocalSdlKeydown {
             alias: sdl_alias.to_string(),
             repeat,
-            ts: InputTimestamp::now(),
+            ts: IoTimestamp::current_time(),
         };
         let _ = self.local_key_tx.send(evt);
     }
@@ -558,7 +558,7 @@ impl GlobalInputCapture {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        FnTrackingMode, InputEvent, InputEventKind, InputTimestamp, ModifierState, SharedState,
+        FnTrackingMode, InputEvent, InputEventKind, IoTimestamp, ModifierState, SharedState,
         apply_probe_alias_lock, capture_is_effectively_enabled, expire_probe_if_timed_out,
         freshest_local_alias, queue_event, should_expose_key_state,
     };
@@ -1026,7 +1026,7 @@ mod macos {
                                 queue_event(
                                     &mut guard,
                                     InputEvent {
-                                        timestamp: Some(InputTimestamp::now()),
+                                        timestamp: Some(IoTimestamp::current_time()),
                                         kind: InputEventKind::KeyDown,
                                         alias,
                                         keycode: Some(keycode),
@@ -1067,7 +1067,7 @@ mod macos {
                                 queue_event(
                                     &mut guard,
                                     InputEvent {
-                                        timestamp: Some(InputTimestamp::now()),
+                                        timestamp: Some(IoTimestamp::current_time()),
                                         kind: InputEventKind::KeyUp,
                                         alias,
                                         keycode: Some(keycode),
@@ -1145,7 +1145,7 @@ mod macos {
                     queue_event(
                         &mut guard,
                         InputEvent {
-                            timestamp: Some(InputTimestamp::now()),
+                            timestamp: Some(IoTimestamp::current_time()),
                             kind: InputEventKind::ModChanged,
                             alias,
                             keycode: Some(keycode),
@@ -1401,7 +1401,7 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::timestamp::InputTimestamp;
+    use crate::runtime::io_timestamp::IoTimestamp;
     use std::sync::{Arc, Mutex};
 
     #[cfg(test)]
@@ -1429,7 +1429,7 @@ mod tests {
 
     fn sample_event(alias: &str, kc: u16) -> InputEvent {
         InputEvent {
-            timestamp: Some(InputTimestamp::now()),
+            timestamp: Some(IoTimestamp::current_time()),
             kind: InputEventKind::KeyDown,
             alias: alias.to_string(),
             keycode: Some(kc),
@@ -1482,7 +1482,7 @@ mod tests {
         queue_event(
             &mut guard,
             InputEvent {
-                timestamp: Some(InputTimestamp::now()),
+                timestamp: Some(IoTimestamp::current_time()),
                 kind: InputEventKind::ModChanged,
                 alias: "KC110".to_string(),
                 keycode: Some(110),
@@ -1537,7 +1537,7 @@ mod tests {
         assert!(snap.active);
         assert!(snap.keys_down.is_empty(), "keys should be hidden during probe gate");
         assert!(
-            capture.next_event_before(InputTimestamp::now()).is_none(),
+            capture.next_event_before(IoTimestamp::current_time()).is_none(),
             "events should be blocked during probe gate"
         );
     }
@@ -1557,7 +1557,7 @@ mod tests {
         let capture = GlobalInputCapture::from_shared_for_tests(shared);
 
         assert!(
-            capture.next_event_before(InputTimestamp::now()).is_none(),
+            capture.next_event_before(IoTimestamp::current_time()).is_none(),
             "pre-lock text key events must not return"
         );
         assert_eq!(
@@ -1566,7 +1566,7 @@ mod tests {
             "probe lock should bind mac kc to SDL alias"
         );
         let event = capture
-            .next_event_before(InputTimestamp::now())
+            .next_event_before(IoTimestamp::current_time())
             .expect("resolved keydown should now return");
         assert!(matches!(event.kind, InputEventKind::KeyDown));
         assert_eq!(event.alias, "O");

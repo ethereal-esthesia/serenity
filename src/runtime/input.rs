@@ -5,13 +5,13 @@ use sdl3::keyboard::Keycode;
 use crate::global_input::{
     GlobalInputCapture, InputEvent, InputEventKind, InputKeyState, ModifierState,
 };
-use crate::runtime::timestamp::InputTimestamp;
+use crate::runtime::io_timestamp::IoTimestamp;
 
 macro_rules! local_key_log {
     ($($arg:tt)*) => {
         println!(
             "[local_input ts={}] {}",
-            InputTimestamp::now().raw(),
+            IoTimestamp::current_time().raw(),
             format!($($arg)*)
         );
     };
@@ -245,7 +245,7 @@ pub fn resolve_input_frame_view(
     };
     capture.set_capture_enabled(should_enable_global_capture(state));
     let mut out = InputFrameView::default();
-    let deadline = InputTimestamp::now();
+    let deadline = IoTimestamp::current_time();
     while let Some(event) = capture.next_event_before(deadline) {
         out.thread_events.push(event);
     }

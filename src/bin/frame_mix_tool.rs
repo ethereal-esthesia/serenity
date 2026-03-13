@@ -1,7 +1,7 @@
 use serenity::runtime::frame_interpolator::{FrameInterpolator, InterpolationError};
-use serenity::runtime::timestamp::InputTimestamp;
+use serenity::runtime::io_timestamp::IoTimestamp;
 
-fn parse_csv_ts(input: &str) -> Result<Vec<InputTimestamp>, String> {
+fn parse_csv_ts(input: &str) -> Result<Vec<IoTimestamp>, String> {
     let mut out = Vec::new();
     for raw in input.split(',') {
         let t = raw.trim();
@@ -11,7 +11,7 @@ fn parse_csv_ts(input: &str) -> Result<Vec<InputTimestamp>, String> {
         let value: u64 = t
             .parse()
             .map_err(|_| format!("invalid integer value: '{t}'"))?;
-        out.push(InputTimestamp::from_raw(value));
+        out.push(IoTimestamp::from_raw(value));
     }
     if out.is_empty() {
         return Err("no timestamp values provided".to_string());
@@ -27,7 +27,7 @@ fn usage() {
     );
 }
 
-fn print_mix_line(target: InputTimestamp, mix: serenity::runtime::frame_interpolator::FrameMix) {
+fn print_mix_line(target: IoTimestamp, mix: serenity::runtime::frame_interpolator::FrameMix) {
     println!(
         "target={}ns between [{}..{}] => {:.3}% ({:.6})",
         target.raw(),

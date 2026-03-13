@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::runtime::timestamp::InputTimestamp;
+use crate::runtime::io_timestamp::IoTimestamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlotState {
@@ -11,9 +11,9 @@ enum SlotState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct FrameTiming {
-    request_sim_time: InputTimestamp,
-    compute_start: InputTimestamp,
-    compute_end: InputTimestamp,
+    request_sim_time: IoTimestamp,
+    compute_start: IoTimestamp,
+    compute_end: IoTimestamp,
 }
 
 #[derive(Debug)]
@@ -52,9 +52,9 @@ pub struct ReadFrameBuffer {
     pub width: u32,
     pub height: u32,
     pub sequence: u64,
-    pub request_sim_time: InputTimestamp,
-    pub compute_start: InputTimestamp,
-    pub compute_end: InputTimestamp,
+    pub request_sim_time: IoTimestamp,
+    pub compute_start: IoTimestamp,
+    pub compute_end: IoTimestamp,
     pub pixels: Vec<u16>,
 }
 
@@ -134,9 +134,9 @@ impl WriteFrameBuffer {
 
     pub fn set_frame_timing(
         &mut self,
-        request_sim_time: InputTimestamp,
-        compute_start: InputTimestamp,
-        compute_end: InputTimestamp,
+        request_sim_time: IoTimestamp,
+        compute_start: IoTimestamp,
+        compute_end: IoTimestamp,
     ) {
         self.timing = FrameTiming {
             request_sim_time,
@@ -264,7 +264,7 @@ impl FrameBufferSource for FrameBufferPool {
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::timestamp::InputTimestamp;
+    use crate::runtime::io_timestamp::IoTimestamp;
 
     use super::{FrameBufferPool, FrameBufferSource};
 
@@ -273,9 +273,9 @@ mod tests {
         let pool = FrameBufferPool::new(4, 2, 3);
         let mut write = pool.get_next_frame_buffer().expect("write frame");
         write.set_frame_timing(
-            InputTimestamp::from_raw(1_000),
-            InputTimestamp::from_raw(1_010),
-            InputTimestamp::from_raw(1_030),
+            IoTimestamp::from_raw(1_000),
+            IoTimestamp::from_raw(1_010),
+            IoTimestamp::from_raw(1_030),
         );
         for (i, p) in write.pixels_mut().iter_mut().enumerate() {
             *p = i as u16;
@@ -287,9 +287,9 @@ mod tests {
         assert_eq!(read.height, 2);
         assert_eq!(read.pixels, vec![0, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(read.sequence, 1);
-        assert_eq!(read.request_sim_time, InputTimestamp::from_raw(1_000));
-        assert_eq!(read.compute_start, InputTimestamp::from_raw(1_010));
-        assert_eq!(read.compute_end, InputTimestamp::from_raw(1_030));
+        assert_eq!(read.request_sim_time, IoTimestamp::from_raw(1_000));
+        assert_eq!(read.compute_start, IoTimestamp::from_raw(1_010));
+        assert_eq!(read.compute_end, IoTimestamp::from_raw(1_030));
     }
 
     #[test]
@@ -310,9 +310,9 @@ mod tests {
         let pool = FrameBufferPool::new(2, 2, 2);
         let mut write1 = pool.get_next_frame_buffer().expect("write1");
         write1.set_frame_timing(
-            InputTimestamp::from_raw(2_000),
-            InputTimestamp::from_raw(2_010),
-            InputTimestamp::from_raw(2_030),
+            IoTimestamp::from_raw(2_000),
+            IoTimestamp::from_raw(2_010),
+            IoTimestamp::from_raw(2_030),
         );
         write1.pixels_mut()[0] = 1;
         pool.publish_frame(write1);
@@ -325,9 +325,9 @@ mod tests {
 
         let mut write2 = pool.get_next_frame_buffer().expect("write2");
         write2.set_frame_timing(
-            InputTimestamp::from_raw(3_000),
-            InputTimestamp::from_raw(3_020),
-            InputTimestamp::from_raw(3_050),
+            IoTimestamp::from_raw(3_000),
+            IoTimestamp::from_raw(3_020),
+            IoTimestamp::from_raw(3_050),
         );
         write2.pixels_mut()[0] = 2;
         pool.publish_frame(write2);
@@ -336,8 +336,8 @@ mod tests {
             .expect("newer frame");
         assert_eq!(second.sequence, 2);
         assert_eq!(second.pixels[0], 2);
-        assert_eq!(second.request_sim_time, InputTimestamp::from_raw(3_000));
-        assert_eq!(second.compute_start, InputTimestamp::from_raw(3_020));
-        assert_eq!(second.compute_end, InputTimestamp::from_raw(3_050));
+        assert_eq!(second.request_sim_time, IoTimestamp::from_raw(3_000));
+        assert_eq!(second.compute_start, IoTimestamp::from_raw(3_020));
+        assert_eq!(second.compute_end, IoTimestamp::from_raw(3_050));
     }
 }

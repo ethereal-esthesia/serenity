@@ -1,21 +1,21 @@
-use crate::runtime::timestamp::InputTimestamp;
+use crate::runtime::io_timestamp::IoTimestamp;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TimedFrameRef<'a> {
-    pub timestamp: InputTimestamp,
+    pub timestamp: IoTimestamp,
     pub pixels: &'a [u16],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterpolatedFrame {
-    pub timestamp: InputTimestamp,
+    pub timestamp: IoTimestamp,
     pub pixels: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameMix {
-    pub left_timestamp: InputTimestamp,
-    pub right_timestamp: InputTimestamp,
+    pub left_timestamp: IoTimestamp,
+    pub right_timestamp: IoTimestamp,
     pub alpha_0_to_1: f64,
 }
 
@@ -25,8 +25,8 @@ pub enum InterpolationError {
     MismatchedBufferLengths,
     OutOfSequenceTimestamps {
         index: usize,
-        prev_ts: InputTimestamp,
-        current_ts: InputTimestamp,
+        prev_ts: IoTimestamp,
+        current_ts: IoTimestamp,
     },
 }
 
@@ -76,8 +76,8 @@ pub struct FrameInterpolator;
 
 impl FrameInterpolator {
     pub fn mix_from_timestamps(
-        timestamps: &[InputTimestamp],
-        target_timestamp: InputTimestamp,
+        timestamps: &[IoTimestamp],
+        target_timestamp: IoTimestamp,
     ) -> Result<FrameMix, InterpolationError> {
         if timestamps.is_empty() {
             return Err(InterpolationError::EmptyInput);
@@ -150,7 +150,7 @@ impl FrameInterpolator {
 
     pub fn interpolate_u16(
         frames: &[TimedFrameRef<'_>],
-        target_timestamp: InputTimestamp,
+        target_timestamp: IoTimestamp,
     ) -> Result<InterpolatedFrame, InterpolationError> {
         let (frame, _) = Self::interpolate_u16_with_mix(frames, target_timestamp)?;
         Ok(frame)
@@ -158,7 +158,7 @@ impl FrameInterpolator {
 
     pub fn interpolate_u16_with_mix(
         frames: &[TimedFrameRef<'_>],
-        target_timestamp: InputTimestamp,
+        target_timestamp: IoTimestamp,
     ) -> Result<(InterpolatedFrame, FrameMix), InterpolationError> {
         if frames.is_empty() {
             return Err(InterpolationError::EmptyInput);
@@ -291,14 +291,14 @@ impl FrameInterpolator {
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::timestamp::InputTimestamp;
+    use crate::runtime::io_timestamp::IoTimestamp;
 
     use super::{FrameInterpolator, InterpolationError, RenderFrameGate, RenderGateError, TimedFrameRef};
 
     #[test]
     fn interpolate_none_for_empty_input() {
         assert_eq!(
-            FrameInterpolator::interpolate_u16(&[], InputTimestamp::from_raw(100))
+            FrameInterpolator::interpolate_u16(&[], IoTimestamp::from_raw(100))
                 .expect_err("empty"),
             InterpolationError::EmptyInput
         );
@@ -310,16 +310,16 @@ mod tests {
         let b = [4u16, 5u16];
         let frames = [
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(0),
+                timestamp: IoTimestamp::from_raw(0),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(10),
+                timestamp: IoTimestamp::from_raw(10),
                 pixels: &b,
             },
         ];
         assert_eq!(
-            FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(5))
+            FrameInterpolator::interpolate_u16(&frames, IoTimestamp::from_raw(5))
                 .expect_err("mismatch"),
             InterpolationError::MismatchedBufferLengths
         );
@@ -329,13 +329,13 @@ mod tests {
     fn interpolate_single_frame_passthrough() {
         let a = [10u16, 20u16, 30u16];
         let frames = [TimedFrameRef {
-            timestamp: InputTimestamp::from_raw(1000),
+            timestamp: IoTimestamp::from_raw(1000),
             pixels: &a,
         }];
-        let out = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(2000))
+        let out = FrameInterpolator::interpolate_u16(&frames, IoTimestamp::from_raw(2000))
             .expect("frame");
         assert_eq!(out.pixels, a);
-        assert_eq!(out.timestamp, InputTimestamp::from_raw(2000));
+        assert_eq!(out.timestamp, IoTimestamp::from_raw(2000));
     }
 
     #[test]
@@ -344,15 +344,15 @@ mod tests {
         let b = [100u16, 200u16, 2000u16];
         let frames = [
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(0),
+                timestamp: IoTimestamp::from_raw(0),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(100),
+                timestamp: IoTimestamp::from_raw(100),
                 pixels: &b,
             },
         ];
-        let out = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(50))
+        let out = FrameInterpolator::interpolate_u16(&frames, IoTimestamp::from_raw(50))
             .expect("frame");
         assert_eq!(out.pixels, vec![50, 150, 1500]);
     }
@@ -364,19 +364,19 @@ mod tests {
         let c = [200u16, 400u16];
         let frames = [
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(0),
+                timestamp: IoTimestamp::from_raw(0),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(10),
+                timestamp: IoTimestamp::from_raw(10),
                 pixels: &b,
             },
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(20),
+                timestamp: IoTimestamp::from_raw(20),
                 pixels: &c,
             },
         ];
-        let out = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(15))
+        let out = FrameInterpolator::interpolate_u16(&frames, IoTimestamp::from_raw(15))
             .expect("frame");
         // halfway between b (10ns) and c (20ns)
         assert_eq!(out.pixels, vec![150, 300]);
@@ -388,17 +388,17 @@ mod tests {
         let b = [110u16, 120u16];
         let frames = [
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(100),
+                timestamp: IoTimestamp::from_raw(100),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(200),
+                timestamp: IoTimestamp::from_raw(200),
                 pixels: &b,
             },
         ];
-        let before = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(50))
+        let before = FrameInterpolator::interpolate_u16(&frames, IoTimestamp::from_raw(50))
             .expect("frame");
-        let after = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(250))
+        let after = FrameInterpolator::interpolate_u16(&frames, IoTimestamp::from_raw(250))
             .expect("frame");
         assert_eq!(before.pixels, a);
         assert_eq!(after.pixels, b);
@@ -411,26 +411,26 @@ mod tests {
         let c = [20u16, 20u16];
         let frames = [
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(0),
+                timestamp: IoTimestamp::from_raw(0),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(20),
+                timestamp: IoTimestamp::from_raw(20),
                 pixels: &c,
             },
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(10),
+                timestamp: IoTimestamp::from_raw(10),
                 pixels: &b,
             },
         ];
-        let err = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(12))
+        let err = FrameInterpolator::interpolate_u16(&frames, IoTimestamp::from_raw(12))
             .expect_err("out-of-sequence");
         assert_eq!(
             err,
             InterpolationError::OutOfSequenceTimestamps {
                 index: 2,
-                prev_ts: InputTimestamp::from_raw(20),
-                current_ts: InputTimestamp::from_raw(10)
+                prev_ts: IoTimestamp::from_raw(20),
+                current_ts: IoTimestamp::from_raw(10)
             }
         );
     }
@@ -441,18 +441,18 @@ mod tests {
         let b = [100u16];
         let frames = [
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(1000),
+                timestamp: IoTimestamp::from_raw(1000),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp: InputTimestamp::from_raw(2000),
+                timestamp: IoTimestamp::from_raw(2000),
                 pixels: &b,
             },
         ];
         let targets = [1000u64, 1250, 1500, 1750, 2000];
         for t in targets {
             let (_frame, mix) =
-                FrameInterpolator::interpolate_u16_with_mix(&frames, InputTimestamp::from_raw(t))
+                FrameInterpolator::interpolate_u16_with_mix(&frames, IoTimestamp::from_raw(t))
                     .expect("mix");
             let pct = mix.alpha_0_to_1 * 100.0;
             println!(
@@ -487,19 +487,19 @@ mod tests {
     fn mix_from_timestamps_errors_on_out_of_sequence() {
         let err = FrameInterpolator::mix_from_timestamps(
             &[
-                InputTimestamp::from_raw(100),
-                InputTimestamp::from_raw(300),
-                InputTimestamp::from_raw(200),
+                IoTimestamp::from_raw(100),
+                IoTimestamp::from_raw(300),
+                IoTimestamp::from_raw(200),
             ],
-            InputTimestamp::from_raw(250),
+            IoTimestamp::from_raw(250),
         )
         .expect_err("out of sequence");
         assert_eq!(
             err,
             InterpolationError::OutOfSequenceTimestamps {
                 index: 2,
-                prev_ts: InputTimestamp::from_raw(300),
-                current_ts: InputTimestamp::from_raw(200)
+                prev_ts: IoTimestamp::from_raw(300),
+                current_ts: IoTimestamp::from_raw(200)
             }
         );
     }

@@ -15,9 +15,9 @@ Producer-side:
 1. `get_next_frame_buffer()` acquires the next writable frame buffer (if available).
 2. Producer writes pixels only to the acquired write frame.
 3. Producer may attach raw timing markers using the project timestamp type:
-   - `request_sim_time: InputTimestamp`
-   - `compute_start: InputTimestamp`
-   - `compute_end: InputTimestamp`
+   - `request_sim_time: IoTimestamp`
+   - `compute_start: IoTimestamp`
+   - `compute_end: IoTimestamp`
 3. `publish_frame(write_frame)` marks the frame as latest completed output.
 
 Consumer-side:
