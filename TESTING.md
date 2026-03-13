@@ -96,3 +96,14 @@ Optional screenshot:
 cd /Users/shane/Project/serenity
 cargo run --bin noise_texture_test -- --screenshot /tmp/serenity_noise.ppm
 ```
+
+## 8) Run interpolation-focused unit + integration suite
+
+```bash
+cd /Users/shane/Project/serenity
+./scripts/test_interpolation.sh
+```
+
+This runs:
+- `cargo test --lib frame_interpolator -- --nocapture`
+- `cargo test --test interpolation_sim -- --nocapture`
