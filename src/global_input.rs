@@ -35,6 +35,10 @@ impl InputTimestamp {
         Self(raw_now_timestamp())
     }
 
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw & TS_PAYLOAD_MASK)
+    }
+
     pub fn raw(self) -> u64 {
         self.0
     }

@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use crate::global_input::InputTimestamp;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlotState {
     Free,
@@ -9,9 +11,9 @@ enum SlotState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct FrameTiming {
-    request_sim_time_ns: u64,
-    compute_start_ns: u64,
-    compute_end_ns: u64,
+    request_sim_time: InputTimestamp,
+    compute_start: InputTimestamp,
+    compute_end: InputTimestamp,
 }
 
 #[derive(Debug)]
@@ -50,9 +52,9 @@ pub struct ReadFrameBuffer {
     pub width: u32,
     pub height: u32,
     pub sequence: u64,
-    pub request_sim_time_ns: u64,
-    pub compute_start_ns: u64,
-    pub compute_end_ns: u64,
+    pub request_sim_time: InputTimestamp,
+    pub compute_start: InputTimestamp,
+    pub compute_end: InputTimestamp,
     pub pixels: Vec<u16>,
 }
 
@@ -132,14 +134,14 @@ impl WriteFrameBuffer {
 
     pub fn set_frame_timing(
         &mut self,
-        request_sim_time_ns: u64,
-        compute_start_ns: u64,
-        compute_end_ns: u64,
+        request_sim_time: InputTimestamp,
+        compute_start: InputTimestamp,
+        compute_end: InputTimestamp,
     ) {
         self.timing = FrameTiming {
-            request_sim_time_ns,
-            compute_start_ns,
-            compute_end_ns,
+            request_sim_time,
+            compute_start,
+            compute_end,
         };
     }
 }
@@ -214,9 +216,9 @@ impl FrameBufferSource for FrameBufferPool {
             width: inner.width,
             height: inner.height,
             sequence,
-            request_sim_time_ns: slot.timing.request_sim_time_ns,
-            compute_start_ns: slot.timing.compute_start_ns,
-            compute_end_ns: slot.timing.compute_end_ns,
+            request_sim_time: slot.timing.request_sim_time,
+            compute_start: slot.timing.compute_start,
+            compute_end: slot.timing.compute_end,
             pixels: slot.pixels.clone(),
         })
     }
@@ -236,9 +238,9 @@ impl FrameBufferSource for FrameBufferPool {
             width: inner.width,
             height: inner.height,
             sequence,
-            request_sim_time_ns: slot.timing.request_sim_time_ns,
-            compute_start_ns: slot.timing.compute_start_ns,
-            compute_end_ns: slot.timing.compute_end_ns,
+            request_sim_time: slot.timing.request_sim_time,
+            compute_start: slot.timing.compute_start,
+            compute_end: slot.timing.compute_end,
             pixels: slot.pixels.clone(),
         })
     }
@@ -262,13 +264,19 @@ impl FrameBufferSource for FrameBufferPool {
 
 #[cfg(test)]
 mod tests {
+    use crate::global_input::InputTimestamp;
+
     use super::{FrameBufferPool, FrameBufferSource};
 
     #[test]
     fn publish_and_read_latest_frame() {
         let pool = FrameBufferPool::new(4, 2, 3);
         let mut write = pool.get_next_frame_buffer().expect("write frame");
-        write.set_frame_timing(1_000, 1_010, 1_030);
+        write.set_frame_timing(
+            InputTimestamp::from_raw(1_000),
+            InputTimestamp::from_raw(1_010),
+            InputTimestamp::from_raw(1_030),
+        );
         for (i, p) in write.pixels_mut().iter_mut().enumerate() {
             *p = i as u16;
         }
@@ -279,9 +287,9 @@ mod tests {
         assert_eq!(read.height, 2);
         assert_eq!(read.pixels, vec![0, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(read.sequence, 1);
-        assert_eq!(read.request_sim_time_ns, 1_000);
-        assert_eq!(read.compute_start_ns, 1_010);
-        assert_eq!(read.compute_end_ns, 1_030);
+        assert_eq!(read.request_sim_time, InputTimestamp::from_raw(1_000));
+        assert_eq!(read.compute_start, InputTimestamp::from_raw(1_010));
+        assert_eq!(read.compute_end, InputTimestamp::from_raw(1_030));
     }
 
     #[test]
@@ -301,7 +309,11 @@ mod tests {
     fn get_latest_frame_after_only_returns_newer_frames() {
         let pool = FrameBufferPool::new(2, 2, 2);
         let mut write1 = pool.get_next_frame_buffer().expect("write1");
-        write1.set_frame_timing(2_000, 2_010, 2_030);
+        write1.set_frame_timing(
+            InputTimestamp::from_raw(2_000),
+            InputTimestamp::from_raw(2_010),
+            InputTimestamp::from_raw(2_030),
+        );
         write1.pixels_mut()[0] = 1;
         pool.publish_frame(write1);
         let first = pool.get_latest_frame().expect("first frame");
@@ -312,7 +324,11 @@ mod tests {
         );
 
         let mut write2 = pool.get_next_frame_buffer().expect("write2");
-        write2.set_frame_timing(3_000, 3_020, 3_050);
+        write2.set_frame_timing(
+            InputTimestamp::from_raw(3_000),
+            InputTimestamp::from_raw(3_020),
+            InputTimestamp::from_raw(3_050),
+        );
         write2.pixels_mut()[0] = 2;
         pool.publish_frame(write2);
         let second = pool
@@ -320,8 +336,8 @@ mod tests {
             .expect("newer frame");
         assert_eq!(second.sequence, 2);
         assert_eq!(second.pixels[0], 2);
-        assert_eq!(second.request_sim_time_ns, 3_000);
-        assert_eq!(second.compute_start_ns, 3_020);
-        assert_eq!(second.compute_end_ns, 3_050);
+        assert_eq!(second.request_sim_time, InputTimestamp::from_raw(3_000));
+        assert_eq!(second.compute_start, InputTimestamp::from_raw(3_020));
+        assert_eq!(second.compute_end, InputTimestamp::from_raw(3_050));
     }
 }

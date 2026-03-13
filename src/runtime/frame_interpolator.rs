@@ -1,19 +1,21 @@
+use crate::global_input::InputTimestamp;
+
 #[derive(Debug, Clone, Copy)]
 pub struct TimedFrameRef<'a> {
-    pub timestamp_ns: u64,
+    pub timestamp: InputTimestamp,
     pub pixels: &'a [u16],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterpolatedFrame {
-    pub timestamp_ns: u64,
+    pub timestamp: InputTimestamp,
     pub pixels: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameMix {
-    pub left_timestamp_ns: u64,
-    pub right_timestamp_ns: u64,
+    pub left_timestamp: InputTimestamp,
+    pub right_timestamp: InputTimestamp,
     pub alpha_0_to_1: f64,
 }
 
@@ -21,7 +23,11 @@ pub struct FrameMix {
 pub enum InterpolationError {
     EmptyInput,
     MismatchedBufferLengths,
-    OutOfSequenceTimestamps { index: usize, prev_ts: u64, current_ts: u64 },
+    OutOfSequenceTimestamps {
+        index: usize,
+        prev_ts: InputTimestamp,
+        current_ts: InputTimestamp,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,17 +75,90 @@ impl RenderFrameGate {
 pub struct FrameInterpolator;
 
 impl FrameInterpolator {
+    pub fn mix_from_timestamps(
+        timestamps: &[InputTimestamp],
+        target_timestamp: InputTimestamp,
+    ) -> Result<FrameMix, InterpolationError> {
+        if timestamps.is_empty() {
+            return Err(InterpolationError::EmptyInput);
+        }
+        for (idx, pair) in timestamps.windows(2).enumerate() {
+            if pair[1] <= pair[0] {
+                return Err(InterpolationError::OutOfSequenceTimestamps {
+                    index: idx + 1,
+                    prev_ts: pair[0],
+                    current_ts: pair[1],
+                });
+            }
+        }
+
+        if target_timestamp <= timestamps[0] {
+            return Ok(FrameMix {
+                left_timestamp: timestamps[0],
+                right_timestamp: timestamps[0],
+                alpha_0_to_1: 0.0,
+            });
+        }
+        let last = timestamps.len() - 1;
+        if target_timestamp >= timestamps[last] {
+            return Ok(FrameMix {
+                left_timestamp: timestamps[last],
+                right_timestamp: timestamps[last],
+                alpha_0_to_1: 1.0,
+            });
+        }
+
+        for pair in timestamps.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            if target_timestamp < a || target_timestamp > b {
+                continue;
+            }
+            if target_timestamp == a {
+                return Ok(FrameMix {
+                    left_timestamp: a,
+                    right_timestamp: b,
+                    alpha_0_to_1: 0.0,
+                });
+            }
+            if target_timestamp == b {
+                return Ok(FrameMix {
+                    left_timestamp: a,
+                    right_timestamp: b,
+                    alpha_0_to_1: 1.0,
+                });
+            }
+            let span = b.raw().saturating_sub(a.raw());
+            let alpha = if span == 0 {
+                1.0
+            } else {
+                (target_timestamp.raw().saturating_sub(a.raw())) as f64 / span as f64
+            };
+            return Ok(FrameMix {
+                left_timestamp: a,
+                right_timestamp: b,
+                alpha_0_to_1: alpha,
+            });
+        }
+
+        Ok(FrameMix {
+            left_timestamp: timestamps[last],
+            right_timestamp: timestamps[last],
+            alpha_0_to_1: 1.0,
+        })
+    }
+
     pub fn interpolate_u16(
         frames: &[TimedFrameRef<'_>],
-        target_timestamp_ns: u64,
+        target_timestamp: InputTimestamp,
     ) -> Result<InterpolatedFrame, InterpolationError> {
-        let (frame, _) = Self::interpolate_u16_with_mix(frames, target_timestamp_ns)?;
+        let (frame, _) = Self::interpolate_u16_with_mix(frames, target_timestamp)?;
         Ok(frame)
     }
 
     pub fn interpolate_u16_with_mix(
         frames: &[TimedFrameRef<'_>],
-        target_timestamp_ns: u64,
+        target_timestamp: InputTimestamp,
     ) -> Result<(InterpolatedFrame, FrameMix), InterpolationError> {
         if frames.is_empty() {
             return Err(InterpolationError::EmptyInput);
@@ -90,38 +169,38 @@ impl FrameInterpolator {
         }
 
         for (idx, pair) in frames.windows(2).enumerate() {
-            if pair[1].timestamp_ns <= pair[0].timestamp_ns {
+            if pair[1].timestamp <= pair[0].timestamp {
                 return Err(InterpolationError::OutOfSequenceTimestamps {
                     index: idx + 1,
-                    prev_ts: pair[0].timestamp_ns,
-                    current_ts: pair[1].timestamp_ns,
+                    prev_ts: pair[0].timestamp,
+                    current_ts: pair[1].timestamp,
                 });
             }
         }
 
-        if target_timestamp_ns <= frames[0].timestamp_ns {
+        if target_timestamp <= frames[0].timestamp {
             return Ok((
                 InterpolatedFrame {
-                    timestamp_ns: target_timestamp_ns,
+                    timestamp: target_timestamp,
                     pixels: frames[0].pixels.to_vec(),
                 },
                 FrameMix {
-                    left_timestamp_ns: frames[0].timestamp_ns,
-                    right_timestamp_ns: frames[0].timestamp_ns,
+                    left_timestamp: frames[0].timestamp,
+                    right_timestamp: frames[0].timestamp,
                     alpha_0_to_1: 0.0,
                 },
             ));
         }
         let last = frames.len() - 1;
-        if target_timestamp_ns >= frames[last].timestamp_ns {
+        if target_timestamp >= frames[last].timestamp {
             return Ok((
                 InterpolatedFrame {
-                    timestamp_ns: target_timestamp_ns,
+                    timestamp: target_timestamp,
                     pixels: frames[last].pixels.to_vec(),
                 },
                 FrameMix {
-                    left_timestamp_ns: frames[last].timestamp_ns,
-                    right_timestamp_ns: frames[last].timestamp_ns,
+                    left_timestamp: frames[last].timestamp,
+                    right_timestamp: frames[last].timestamp,
                     alpha_0_to_1: 1.0,
                 },
             ));
@@ -130,50 +209,51 @@ impl FrameInterpolator {
         for pair in frames.windows(2) {
             let a = pair[0];
             let b = pair[1];
-            if target_timestamp_ns < a.timestamp_ns || target_timestamp_ns > b.timestamp_ns {
+            if target_timestamp < a.timestamp || target_timestamp > b.timestamp {
                 continue;
             }
-            if target_timestamp_ns == a.timestamp_ns {
+            if target_timestamp == a.timestamp {
                 return Ok((
                     InterpolatedFrame {
-                        timestamp_ns: target_timestamp_ns,
+                        timestamp: target_timestamp,
                         pixels: a.pixels.to_vec(),
                     },
                     FrameMix {
-                        left_timestamp_ns: a.timestamp_ns,
-                        right_timestamp_ns: b.timestamp_ns,
+                        left_timestamp: a.timestamp,
+                        right_timestamp: b.timestamp,
                         alpha_0_to_1: 0.0,
                     },
                 ));
             }
-            if target_timestamp_ns == b.timestamp_ns {
+            if target_timestamp == b.timestamp {
                 return Ok((
                     InterpolatedFrame {
-                        timestamp_ns: target_timestamp_ns,
+                        timestamp: target_timestamp,
                         pixels: b.pixels.to_vec(),
                     },
                     FrameMix {
-                        left_timestamp_ns: a.timestamp_ns,
-                        right_timestamp_ns: b.timestamp_ns,
+                        left_timestamp: a.timestamp,
+                        right_timestamp: b.timestamp,
                         alpha_0_to_1: 1.0,
                     },
                 ));
             }
-            let span = b.timestamp_ns.saturating_sub(a.timestamp_ns);
+            let span = b.timestamp.raw().saturating_sub(a.timestamp.raw());
             if span == 0 {
                 return Ok((
                     InterpolatedFrame {
-                        timestamp_ns: target_timestamp_ns,
+                        timestamp: target_timestamp,
                         pixels: b.pixels.to_vec(),
                     },
                     FrameMix {
-                        left_timestamp_ns: a.timestamp_ns,
-                        right_timestamp_ns: b.timestamp_ns,
+                        left_timestamp: a.timestamp,
+                        right_timestamp: b.timestamp,
                         alpha_0_to_1: 1.0,
                     },
                 ));
             }
-            let alpha = (target_timestamp_ns.saturating_sub(a.timestamp_ns)) as f64 / span as f64;
+            let alpha =
+                (target_timestamp.raw().saturating_sub(a.timestamp.raw())) as f64 / span as f64;
             let mut out = Vec::with_capacity(len);
             for i in 0..len {
                 let av = a.pixels[i] as f64;
@@ -183,12 +263,12 @@ impl FrameInterpolator {
             }
             return Ok((
                 InterpolatedFrame {
-                    timestamp_ns: target_timestamp_ns,
+                    timestamp: target_timestamp,
                     pixels: out,
                 },
                 FrameMix {
-                    left_timestamp_ns: a.timestamp_ns,
-                    right_timestamp_ns: b.timestamp_ns,
+                    left_timestamp: a.timestamp,
+                    right_timestamp: b.timestamp,
                     alpha_0_to_1: alpha,
                 },
             ));
@@ -197,12 +277,12 @@ impl FrameInterpolator {
         // Unreachable due to boundary checks.
         Ok((
             InterpolatedFrame {
-                timestamp_ns: target_timestamp_ns,
+                timestamp: target_timestamp,
                 pixels: frames[last].pixels.to_vec(),
             },
             FrameMix {
-                left_timestamp_ns: frames[last].timestamp_ns,
-                right_timestamp_ns: frames[last].timestamp_ns,
+                left_timestamp: frames[last].timestamp,
+                right_timestamp: frames[last].timestamp,
                 alpha_0_to_1: 1.0,
             },
         ))
@@ -211,12 +291,15 @@ impl FrameInterpolator {
 
 #[cfg(test)]
 mod tests {
+    use crate::global_input::InputTimestamp;
+
     use super::{FrameInterpolator, InterpolationError, RenderFrameGate, RenderGateError, TimedFrameRef};
 
     #[test]
     fn interpolate_none_for_empty_input() {
         assert_eq!(
-            FrameInterpolator::interpolate_u16(&[], 100).expect_err("empty"),
+            FrameInterpolator::interpolate_u16(&[], InputTimestamp::from_raw(100))
+                .expect_err("empty"),
             InterpolationError::EmptyInput
         );
     }
@@ -227,16 +310,17 @@ mod tests {
         let b = [4u16, 5u16];
         let frames = [
             TimedFrameRef {
-                timestamp_ns: 0,
+                timestamp: InputTimestamp::from_raw(0),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp_ns: 10,
+                timestamp: InputTimestamp::from_raw(10),
                 pixels: &b,
             },
         ];
         assert_eq!(
-            FrameInterpolator::interpolate_u16(&frames, 5).expect_err("mismatch"),
+            FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(5))
+                .expect_err("mismatch"),
             InterpolationError::MismatchedBufferLengths
         );
     }
@@ -245,12 +329,13 @@ mod tests {
     fn interpolate_single_frame_passthrough() {
         let a = [10u16, 20u16, 30u16];
         let frames = [TimedFrameRef {
-            timestamp_ns: 1000,
+            timestamp: InputTimestamp::from_raw(1000),
             pixels: &a,
         }];
-        let out = FrameInterpolator::interpolate_u16(&frames, 2000).expect("frame");
+        let out = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(2000))
+            .expect("frame");
         assert_eq!(out.pixels, a);
-        assert_eq!(out.timestamp_ns, 2000);
+        assert_eq!(out.timestamp, InputTimestamp::from_raw(2000));
     }
 
     #[test]
@@ -259,15 +344,16 @@ mod tests {
         let b = [100u16, 200u16, 2000u16];
         let frames = [
             TimedFrameRef {
-                timestamp_ns: 0,
+                timestamp: InputTimestamp::from_raw(0),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp_ns: 100,
+                timestamp: InputTimestamp::from_raw(100),
                 pixels: &b,
             },
         ];
-        let out = FrameInterpolator::interpolate_u16(&frames, 50).expect("frame");
+        let out = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(50))
+            .expect("frame");
         assert_eq!(out.pixels, vec![50, 150, 1500]);
     }
 
@@ -278,19 +364,20 @@ mod tests {
         let c = [200u16, 400u16];
         let frames = [
             TimedFrameRef {
-                timestamp_ns: 0,
+                timestamp: InputTimestamp::from_raw(0),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp_ns: 10,
+                timestamp: InputTimestamp::from_raw(10),
                 pixels: &b,
             },
             TimedFrameRef {
-                timestamp_ns: 20,
+                timestamp: InputTimestamp::from_raw(20),
                 pixels: &c,
             },
         ];
-        let out = FrameInterpolator::interpolate_u16(&frames, 15).expect("frame");
+        let out = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(15))
+            .expect("frame");
         // halfway between b (10ns) and c (20ns)
         assert_eq!(out.pixels, vec![150, 300]);
     }
@@ -301,16 +388,18 @@ mod tests {
         let b = [110u16, 120u16];
         let frames = [
             TimedFrameRef {
-                timestamp_ns: 100,
+                timestamp: InputTimestamp::from_raw(100),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp_ns: 200,
+                timestamp: InputTimestamp::from_raw(200),
                 pixels: &b,
             },
         ];
-        let before = FrameInterpolator::interpolate_u16(&frames, 50).expect("frame");
-        let after = FrameInterpolator::interpolate_u16(&frames, 250).expect("frame");
+        let before = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(50))
+            .expect("frame");
+        let after = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(250))
+            .expect("frame");
         assert_eq!(before.pixels, a);
         assert_eq!(after.pixels, b);
     }
@@ -322,25 +411,26 @@ mod tests {
         let c = [20u16, 20u16];
         let frames = [
             TimedFrameRef {
-                timestamp_ns: 0,
+                timestamp: InputTimestamp::from_raw(0),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp_ns: 20,
+                timestamp: InputTimestamp::from_raw(20),
                 pixels: &c,
             },
             TimedFrameRef {
-                timestamp_ns: 10,
+                timestamp: InputTimestamp::from_raw(10),
                 pixels: &b,
             },
         ];
-        let err = FrameInterpolator::interpolate_u16(&frames, 12).expect_err("out-of-sequence");
+        let err = FrameInterpolator::interpolate_u16(&frames, InputTimestamp::from_raw(12))
+            .expect_err("out-of-sequence");
         assert_eq!(
             err,
             InterpolationError::OutOfSequenceTimestamps {
                 index: 2,
-                prev_ts: 20,
-                current_ts: 10
+                prev_ts: InputTimestamp::from_raw(20),
+                current_ts: InputTimestamp::from_raw(10)
             }
         );
     }
@@ -351,22 +441,26 @@ mod tests {
         let b = [100u16];
         let frames = [
             TimedFrameRef {
-                timestamp_ns: 1000,
+                timestamp: InputTimestamp::from_raw(1000),
                 pixels: &a,
             },
             TimedFrameRef {
-                timestamp_ns: 2000,
+                timestamp: InputTimestamp::from_raw(2000),
                 pixels: &b,
             },
         ];
         let targets = [1000u64, 1250, 1500, 1750, 2000];
         for t in targets {
             let (_frame, mix) =
-                FrameInterpolator::interpolate_u16_with_mix(&frames, t).expect("mix");
+                FrameInterpolator::interpolate_u16_with_mix(&frames, InputTimestamp::from_raw(t))
+                    .expect("mix");
             let pct = mix.alpha_0_to_1 * 100.0;
             println!(
                 "mix target={}ns between [{}..{}] => {:.1}%",
-                t, mix.left_timestamp_ns, mix.right_timestamp_ns, pct
+                t,
+                mix.left_timestamp.raw(),
+                mix.right_timestamp.raw(),
+                pct
             );
         }
     }
@@ -387,5 +481,26 @@ mod tests {
 
         gate.complete_frame(1).expect("complete expected sequence");
         assert_eq!(gate.request_next_if_ready(), Some(2), "ready for next request");
+    }
+
+    #[test]
+    fn mix_from_timestamps_errors_on_out_of_sequence() {
+        let err = FrameInterpolator::mix_from_timestamps(
+            &[
+                InputTimestamp::from_raw(100),
+                InputTimestamp::from_raw(300),
+                InputTimestamp::from_raw(200),
+            ],
+            InputTimestamp::from_raw(250),
+        )
+        .expect_err("out of sequence");
+        assert_eq!(
+            err,
+            InterpolationError::OutOfSequenceTimestamps {
+                index: 2,
+                prev_ts: InputTimestamp::from_raw(300),
+                current_ts: InputTimestamp::from_raw(200)
+            }
+        );
     }
 }
