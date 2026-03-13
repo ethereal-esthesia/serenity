@@ -1,0 +1,45 @@
+flowchart TD
+    A["CGEventTap receives key event"] --> B{"capture_enabled?"}
+    B -->|No| Z["Return original event"]
+    B -->|Yes| C{"debug passthrough combo?"}
+    C -->|Yes| Z
+    C -->|No| D{"Probe pending?"}
+
+    D -->|Yes, different keycode| E{"Event is non-mod and non-functional?"}
+    E -->|Yes| F["Pass through to OS\nDo not queue/return app event"]
+    E -->|No| G["Consume event\nDo not queue/return app event"]
+    F --> H["Wait for probe lock or timeout"]
+    G --> H
+
+    D -->|No or same keycode| I{"Event type"}
+
+    I -->|KeyDown| J{"Modifier or functional?"}
+    J -->|Yes| K["Consume\nQueue normal event with preset alias"]
+    J -->|No| L{"Alias already locked?"}
+
+    L -->|No| M["Start probe (pending keycode + start time)\nDebug: probe_start"]
+    M --> N["Pass through to OS\nTrack key internally as deferred"]
+    N --> H
+
+    L -->|Yes| O["Pass through to OS\nQueue KeyDown with locked alias"]
+
+    I -->|KeyUp| P{"Modifier or functional?"}
+    P -->|Yes| Q["Consume\nQueue KeyUp"]
+    P -->|No| R{"Deferred unresolved key?"}
+    R -->|Yes| S["Pass through to OS\nNo queued app event"]
+    R -->|No| T["Pass through to OS\nQueue KeyUp"]
+
+    I -->|FlagsChanged| U["Update modifier/fn state\nQueue ModChanged\nConsume"]
+
+    H --> V{"Probe lock received from SDL keydown alias?"}
+    V -->|Yes| W["Lock alias mapping\nBackfill queued/current state\nEmit deferred KeyDown if still held\nDebug: probe_locked"]
+    V -->|No| X{"Probe age >= 4ms?"}
+    X -->|Yes| Y["Drop unresolved probe key\nClear pending probe\nDebug: probe_timeout_drop"]
+    X -->|No| H
+
+    O --> AA["Return/queue available to main"]
+    K --> AA
+    Q --> AA
+    T --> AA
+    U --> AA
+    W --> AA
