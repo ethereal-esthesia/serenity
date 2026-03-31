@@ -75,6 +75,27 @@ impl RenderFrameGate {
 pub struct FrameInterpolator;
 
 impl FrameInterpolator {
+    fn compute_alpha_q16(
+        left: IoTimestamp,
+        right: IoTimestamp,
+        target: IoTimestamp,
+    ) -> u32 {
+        if target <= left {
+            return 0;
+        }
+        if target >= right {
+            return 65_536;
+        }
+        let span = right.raw().saturating_sub(left.raw());
+        if span == 0 {
+            return 65_536;
+        }
+        let offset = target.raw().saturating_sub(left.raw());
+        // Rounded fixed-point Q16 ratio in [0, 65536].
+        let q16 = ((offset as u128 * 65_536u128) + (span as u128 / 2)) / span as u128;
+        q16.min(65_536) as u32
+    }
+
     pub fn mix_from_timestamps(
         timestamps: &[IoTimestamp],
         target_timestamp: IoTimestamp,
@@ -128,16 +149,11 @@ impl FrameInterpolator {
                     alpha_0_to_1: 1.0,
                 });
             }
-            let span = b.raw().saturating_sub(a.raw());
-            let alpha = if span == 0 {
-                1.0
-            } else {
-                (target_timestamp.raw().saturating_sub(a.raw())) as f64 / span as f64
-            };
+            let alpha_q16 = Self::compute_alpha_q16(a, b, target_timestamp);
             return Ok(FrameMix {
                 left_timestamp: a,
                 right_timestamp: b,
-                alpha_0_to_1: alpha,
+                alpha_0_to_1: alpha_q16 as f64 / 65_536.0,
             });
         }
 
@@ -238,28 +254,15 @@ impl FrameInterpolator {
                     },
                 ));
             }
-            let span = b.timestamp.raw().saturating_sub(a.timestamp.raw());
-            if span == 0 {
-                return Ok((
-                    InterpolatedFrame {
-                        timestamp: target_timestamp,
-                        pixels: b.pixels.to_vec(),
-                    },
-                    FrameMix {
-                        left_timestamp: a.timestamp,
-                        right_timestamp: b.timestamp,
-                        alpha_0_to_1: 1.0,
-                    },
-                ));
-            }
-            let alpha =
-                (target_timestamp.raw().saturating_sub(a.timestamp.raw())) as f64 / span as f64;
+            let alpha_q16 = Self::compute_alpha_q16(a.timestamp, b.timestamp, target_timestamp);
+            let inv_q16 = 65_536u32.saturating_sub(alpha_q16);
             let mut out = Vec::with_capacity(len);
             for i in 0..len {
-                let av = a.pixels[i] as f64;
-                let bv = b.pixels[i] as f64;
-                let v = av + (bv - av) * alpha;
-                out.push(v.round().clamp(0.0, u16::MAX as f64) as u16);
+                let av = a.pixels[i] as u64;
+                let bv = b.pixels[i] as u64;
+                let mixed =
+                    ((av * inv_q16 as u64) + (bv * alpha_q16 as u64) + 32_768u64) >> 16;
+                out.push(mixed.min(u16::MAX as u64) as u16);
             }
             return Ok((
                 InterpolatedFrame {
@@ -269,7 +272,7 @@ impl FrameInterpolator {
                 FrameMix {
                     left_timestamp: a.timestamp,
                     right_timestamp: b.timestamp,
-                    alpha_0_to_1: alpha,
+                    alpha_0_to_1: alpha_q16 as f64 / 65_536.0,
                 },
             ));
         }
@@ -311,6 +314,21 @@ mod tests {
             }
             let hz = segments[seg_idx].1;
             t = t.saturating_add(hz_to_period_ns(hz));
+        }
+        out
+    }
+
+    fn generate_constant_hz_timestamps_exact_ns(duration_ns: u64, hz: u64) -> Vec<u64> {
+        assert!(hz > 0, "hz must be > 0");
+        let mut out = Vec::new();
+        let mut i = 0u64;
+        loop {
+            let t = ((i as u128 * 1_000_000_000u128 + (hz as u128 / 2)) / hz as u128) as u64;
+            if t > duration_ns {
+                break;
+            }
+            out.push(t);
+            i = i.saturating_add(1);
         }
         out
     }
@@ -566,6 +584,36 @@ mod tests {
             }
         }
         assert!(interpolated > 0, "expected non-trivial interpolation for 23->120 conversion");
+    }
+
+    #[test]
+    fn simulation_25hz_input_to_120hz_output() {
+        // 25Hz and 120Hz re-align every 200ms (gcd=5Hz).
+        let duration_ns = 200_000_000u64;
+        let input_ts: Vec<IoTimestamp> = generate_constant_hz_timestamps_exact_ns(duration_ns, 25)
+            .into_iter()
+            .map(IoTimestamp::from_raw)
+            .collect();
+        let output_targets = generate_constant_hz_timestamps_exact_ns(duration_ns, 120);
+
+        let mut interpolated = 0usize;
+        let mut exact_realign = 0usize;
+        for t in output_targets {
+            let mix = FrameInterpolator::mix_from_timestamps(&input_ts, IoTimestamp::from_raw(t))
+                .expect("mix");
+            assert!(mix.alpha_0_to_1 >= 0.0 && mix.alpha_0_to_1 <= 1.0);
+            if mix.left_timestamp == mix.right_timestamp {
+                exact_realign += 1;
+            }
+            if mix.alpha_0_to_1 > 0.0 && mix.alpha_0_to_1 < 1.0 {
+                interpolated += 1;
+            }
+        }
+        assert!(interpolated > 0, "expected non-trivial interpolation for 25->120 conversion");
+        assert!(
+            exact_realign >= 2,
+            "expected at least start and end exact realignment points for one full cycle"
+        );
     }
 
     #[test]
